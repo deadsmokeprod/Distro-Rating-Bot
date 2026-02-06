@@ -51,7 +51,21 @@ async def support_description(
     data = await state.get_data()
     subject = data.get("subject")
     description = message.text or ""
-    topic = await message.bot.create_forum_topic(config.bot_support_group_id, subject)
+    if not config.bot_support_group_id:
+        await message.answer(
+            "Группа поддержки не настроена. Укажите BOT_SUPPORT_GROUP_ID в .env."
+        )
+        await state.clear()
+        return
+    try:
+        topic = await message.bot.create_forum_topic(config.bot_support_group_id, subject)
+    except TelegramBadRequest:
+        await message.answer(
+            "Не удалось создать обращение. Проверьте, что бот добавлен в группу поддержки "
+            "и у него есть права создавать темы."
+        )
+        await state.clear()
+        return
     thread_id = topic.message_thread_id
     async with session_factory() as session:
         ticket = await create_support_ticket(
