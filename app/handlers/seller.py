@@ -21,6 +21,7 @@ from app.keyboards.seller import (
     seller_back_menu,
     seller_main_menu,
     seller_retry_menu,
+    seller_start_menu,
 )
 from app.utils.security import verify_password
 from app.utils.time import format_iso_human, now_utc_iso
@@ -80,7 +81,7 @@ async def _process_registration(
         await _send_error(message)
 
 
-@router.message(F.text == SELLER_COMPANY_YES)
+@router.message(F.text.in_({SELLER_COMPANY_YES, "Да", "ДА", "да"}))
 async def seller_register_start(message: Message, state: FSMContext) -> None:
     if is_manager(message.from_user.id):
         return
@@ -94,7 +95,7 @@ async def seller_register_start(message: Message, state: FSMContext) -> None:
     await message.answer("Введите ИНН организации (10 или 12 цифр).", reply_markup=seller_back_menu())
 
 
-@router.message(F.text == SELLER_COMPANY_NO)
+@router.message(F.text.in_({SELLER_COMPANY_NO, "Нет", "НЕТ", "нет"}))
 async def seller_company_no(message: Message, state: FSMContext) -> None:
     if is_manager(message.from_user.id):
         return
@@ -242,4 +243,4 @@ async def seller_fallback(message: Message, state: FSMContext) -> None:
     if user:
         await message.answer("Пожалуйста, выберите пункт меню.", reply_markup=seller_main_menu())
     else:
-        await show_seller_start(message)
+        await message.answer("Пожалуйста, выберите «Да» или «Нет».", reply_markup=seller_start_menu())

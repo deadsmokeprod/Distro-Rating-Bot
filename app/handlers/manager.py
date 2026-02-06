@@ -235,7 +235,7 @@ async def manager_open_card_from_message(message: Message, state: FSMContext) ->
     if not org_id:
         await show_manager_menu(message)
         return
-    await _send_org_card(message, org_id, back_page=None)
+    await _send_org_card(message, message.from_user.id, org_id, back_page=None)
 
 
 @router.message(F.text == ORG_CREATE_BACK_TO_MENU)
@@ -286,15 +286,17 @@ async def _send_org_list(message: Message, page: int, edit: bool = False) -> Non
         await message.answer(text, reply_markup=keyboard)
 
 
-async def _send_org_card(message: Message, org_id: int, back_page: int | None) -> None:
+async def _send_org_card(
+    message: Message, user_id: int, org_id: int, back_page: int | None
+) -> None:
     config = get_config()
     org = await sqlite.get_org_by_id(config.db_path, org_id)
-    if not org or int(org["created_by_manager_id"]) != message.from_user.id:
+    if not org or int(org["created_by_manager_id"]) != user_id:
         await message.answer("Организация не найдена.", reply_markup=manager_main_menu())
         return
     await sqlite.log_audit(
         config.db_path,
-        actor_tg_user_id=message.from_user.id,
+        actor_tg_user_id=user_id,
         actor_role="manager",
         action="VIEW_ORG",
         payload={"org_id": org_id},
@@ -316,7 +318,7 @@ async def manager_org_open(callback: CallbackQuery) -> None:
         await callback.answer()
         return
     _, org_id, page = callback.data.split(":")
-    await _send_org_card(callback.message, int(org_id), back_page=int(page))
+    await _send_org_card(callback.message, callback.from_user.id, int(org_id), back_page=int(page))
     await callback.answer()
 
 
