@@ -7,6 +7,7 @@ from logging.handlers import RotatingFileHandler
 from aiogram import Bot, Dispatcher
 from aiogram.enums import ParseMode
 from aiogram.fsm.storage.memory import MemoryStorage
+from aiogram.client.default import DefaultBotProperties
 
 from app.config import load_config
 from app.db.sqlite import init_db
@@ -30,7 +31,10 @@ async def main() -> None:
 
     await init_db(config.db_path)
 
-    bot = Bot(token=config.bot_token, parse_mode=ParseMode.HTML)
+    bot = Bot(
+        token=config.bot_token,
+        default=DefaultBotProperties(parse_mode=ParseMode.HTML),
+    )
     dp = Dispatcher(storage=MemoryStorage())
 
     dp.include_router(start.router)
