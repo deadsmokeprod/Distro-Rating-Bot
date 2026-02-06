@@ -1,4 +1,5 @@
 import json
+import ast
 import os
 from dataclasses import dataclass
 from typing import Dict, List
@@ -15,7 +16,16 @@ def _parse_ids(value: str) -> List[int]:
 def _parse_menu(value: str) -> Dict[str, List[str]]:
     if not value:
         return {}
-    return json.loads(value)
+    try:
+        return json.loads(value)
+    except json.JSONDecodeError:
+        try:
+            parsed = ast.literal_eval(value)
+            if isinstance(parsed, dict):
+                return parsed
+        except (ValueError, SyntaxError):
+            pass
+    return {}
 
 
 @dataclass
