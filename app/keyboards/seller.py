@@ -25,3 +25,7 @@ def seller_back_menu():
 
 def seller_retry_menu():
     return build_reply_keyboard([SELLER_RETRY, SELLER_SUPPORT, BACK_TEXT])
+
+
+def seller_support_menu():
+    return build_reply_keyboard([SELLER_SUPPORT, BACK_TEXT])

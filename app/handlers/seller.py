@@ -22,6 +22,7 @@ from app.keyboards.seller import (
     seller_back_menu,
     seller_main_menu,
     seller_retry_menu,
+    seller_support_menu,
     seller_start_menu,
 )
 from app.utils.security import verify_password
@@ -106,7 +107,7 @@ async def _handle_company_no(message: Message, state: FSMContext) -> None:
     await message.answer(
         "Для регистрации компании обратитесь в техподдержку.\n"
         f"Контакт: {support_link}",
-        reply_markup=seller_back_menu(),
+        reply_markup=seller_support_menu(),
     )
 
 
@@ -191,7 +192,7 @@ async def seller_support(message: Message) -> None:
         return
     config = get_config()
     support_link = f"<a href=\"tg://user?id={config.support_user_id}\">техподдержку</a>"
-    await message.answer(f"Контакт поддержки: {support_link}", reply_markup=seller_retry_menu())
+    await message.answer(f"Контакт поддержки: {support_link}", reply_markup=seller_support_menu())
 
 
 @router.message(F.text == SELLER_MENU_PROFILE)
