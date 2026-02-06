@@ -16,10 +16,12 @@ class AuthMiddleware(BaseMiddleware):
         event: Message,
         data: dict,
     ) -> Any:
+        if not isinstance(event, Message) or not event.from_user:
+            return await handler(event, data)
+        if event.text and event.text.strip().startswith("/start"):
+            return await handler(event, data)
         allow = data.get("allow_unauthorized")
         if allow:
-            return await handler(event, data)
-        if not isinstance(event, Message) or not event.from_user:
             return await handler(event, data)
         async with self.session_factory() as session:
             user = await get_user_by_tg(session, event.from_user.id)
