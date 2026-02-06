@@ -60,7 +60,10 @@ async def main() -> None:
     scheduler.add_job(sync_erp, CronTrigger.from_crontab(config.sync_cron), args=[config, session_factory])
     scheduler.start()
 
-    await dp.start_polling(bot)
+    try:
+        await dp.start_polling(bot)
+    except (asyncio.CancelledError, KeyboardInterrupt):
+        logging.info("Polling stopped by user.")
 
 
 if __name__ == "__main__":

@@ -10,6 +10,18 @@ from dotenv import load_dotenv
 def _parse_ids(value: str) -> List[int]:
     if not value:
         return []
+    try:
+        parsed = json.loads(value)
+        if isinstance(parsed, list):
+            return [int(item) for item in parsed]
+    except json.JSONDecodeError:
+        pass
+    try:
+        parsed = ast.literal_eval(value)
+        if isinstance(parsed, (list, tuple)):
+            return [int(item) for item in parsed]
+    except (ValueError, SyntaxError):
+        pass
     return [int(item.strip()) for item in value.split(",") if item.strip()]
 
 
@@ -26,6 +38,48 @@ def _parse_menu(value: str) -> Dict[str, List[str]]:
         except (ValueError, SyntaxError):
             pass
     return {}
+
+
+DEFAULT_MENU_CONFIG = {
+    "SUPER_ADMIN": [
+        "RATING_EXPORT",
+        "MY_DISTRIBUTORS",
+        "RATING_PERSONAL",
+        "RATING_ORG",
+        "RATING_ALL",
+        "PROFILE",
+        "SETTINGS",
+        "SUPPORT",
+    ],
+    "ADMIN": [
+        "RATING_EXPORT",
+        "MY_DISTRIBUTORS",
+        "RATING_PERSONAL",
+        "RATING_ORG",
+        "RATING_ALL",
+        "PROFILE",
+        "SETTINGS",
+        "SUPPORT",
+    ],
+    "MINI_ADMIN": [
+        "RATING_PERSONAL",
+        "RATING_ORG",
+        "RATING_ALL",
+        "CONFIRM_SALE",
+        "PROFILE",
+        "SETTINGS",
+        "SUPPORT",
+    ],
+    "USER": [
+        "RATING_PERSONAL",
+        "RATING_ORG",
+        "RATING_ALL",
+        "CONFIRM_SALE",
+        "PROFILE",
+        "SETTINGS",
+        "SUPPORT",
+    ],
+}
 
 
 @dataclass
@@ -48,6 +102,12 @@ class Config:
     @staticmethod
     def load() -> "Config":
         load_dotenv()
+        menu_config = _parse_menu(os.getenv("MENU_CONFIG_JSON", "{}"))
+        if not menu_config:
+            menu_config = DEFAULT_MENU_CONFIG
+        else:
+            for role, buttons in DEFAULT_MENU_CONFIG.items():
+                menu_config.setdefault(role, buttons)
         return Config(
             bot_token=os.getenv("BOT_TOKEN", ""),
             db_path=os.getenv("DB_PATH", "./data/database.sqlite3"),
@@ -60,7 +120,7 @@ class Config:
             erp_http_user=os.getenv("ERP_HTTP_USER", ""),
             erp_http_password=os.getenv("ERP_HTTP_PASSWORD", ""),
             erp_timeout_sec=int(os.getenv("ERP_TIMEOUT_SEC", "30")),
-            menu_config=_parse_menu(os.getenv("MENU_CONFIG_JSON", "{}")),
+            menu_config=menu_config,
             sync_cron=os.getenv("SYNC_CRON", "0 4 * * 0"),
         )
 
