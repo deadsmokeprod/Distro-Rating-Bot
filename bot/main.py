@@ -34,6 +34,10 @@ async def main() -> None:
     if not config.bot_token:
         raise SystemExit("BOT_TOKEN is required")
 
+    db_path = Path(config.db_path)
+    if db_path.parent and not db_path.parent.exists():
+        db_path.parent.mkdir(parents=True, exist_ok=True)
+
     engine = create_engine(config.db_path)
     session_factory = create_session_factory(engine)
     await run_migrations(engine)

@@ -43,6 +43,10 @@
    pip install -r requirements.txt
    ```
 7. Создайте файл `.env` из `.env.example` и заполните значения.
+   Убедитесь, что папка `data` существует (в ней будет база SQLite).
+   ```powershell
+   New-Item -ItemType Directory -Force data
+   ```
 8. Убедитесь, что файл `1cerpsql` уже лежит в корне проекта.
 9. Запустите бота:
    ```powershell
