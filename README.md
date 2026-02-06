@@ -16,8 +16,12 @@
    ```powershell
    winget install Python.Python.3.12
    ```
-2. Скачайте и распакуйте проект в удобную папку.
-3. Откройте **PowerShell** в папке проекта.
+2. Скачайте и распакуйте проект в удобную папку (или клонируйте через git).
+   ```powershell
+   git clone https://github.com/deadsmokeprod/Distro-Rating-Bot.git
+   cd Distro-Rating-Bot
+   ```
+3. Откройте **PowerShell** в папке проекта (корень репозитория, где лежит `requirements.txt`).
 4. Создайте виртуальное окружение:
    ```powershell
    python -m venv .venv
