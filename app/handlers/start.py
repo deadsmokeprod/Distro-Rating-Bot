@@ -35,7 +35,7 @@ async def show_seller_menu(message: Message) -> None:
 async def show_seller_start(message: Message) -> None:
     await message.answer(
         "Вы ещё не зарегистрированы.\n"
-        "Для входа введите ИНН организации и пароль, который вам выдал менеджер.",
+        "Ваша компания зарегистрирована?",
         reply_markup=seller_start_menu(),
     )
 

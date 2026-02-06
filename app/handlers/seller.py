@@ -12,9 +12,10 @@ from app.db import sqlite
 from app.handlers.start import is_manager, show_seller_menu, show_seller_start
 from app.keyboards.common import BACK_TEXT
 from app.keyboards.seller import (
+    SELLER_COMPANY_NO,
+    SELLER_COMPANY_YES,
     SELLER_MENU_HELP,
     SELLER_MENU_PROFILE,
-    SELLER_REGISTER,
     SELLER_RETRY,
     SELLER_SUPPORT,
     seller_back_menu,
@@ -79,7 +80,7 @@ async def _process_registration(
         await _send_error(message)
 
 
-@router.message(F.text == SELLER_REGISTER)
+@router.message(F.text == SELLER_COMPANY_YES)
 async def seller_register_start(message: Message, state: FSMContext) -> None:
     if is_manager(message.from_user.id):
         return
@@ -91,6 +92,20 @@ async def seller_register_start(message: Message, state: FSMContext) -> None:
     await state.clear()
     await state.set_state(SellerRegisterStates.inn)
     await message.answer("Введите ИНН организации (10 или 12 цифр).", reply_markup=seller_back_menu())
+
+
+@router.message(F.text == SELLER_COMPANY_NO)
+async def seller_company_no(message: Message, state: FSMContext) -> None:
+    if is_manager(message.from_user.id):
+        return
+    await state.clear()
+    config = get_config()
+    support_link = f"<a href=\"tg://user?id={config.support_user_id}\">техподдержку</a>"
+    await message.answer(
+        "Для регистрации компании обратитесь в техподдержку.\n"
+        f"Контакт: {support_link}",
+        reply_markup=seller_back_menu(),
+    )
 
 
 @router.message(SellerRegisterStates.inn, F.text == BACK_TEXT)
@@ -107,6 +122,17 @@ async def seller_register_inn_input(message: Message, state: FSMContext) -> None
     inn = message.text.strip()
     if not validate_inn(inn):
         await message.answer("ИНН должен содержать 10 или 12 цифр", reply_markup=seller_back_menu())
+        return
+    config = get_config()
+    org = await sqlite.get_org_by_inn(config.db_path, inn)
+    if not org:
+        support_link = f"<a href=\"tg://user?id={config.support_user_id}\">техподдержку</a>"
+        await message.answer(
+            "Организация не найдена.\n"
+            "Проверьте ИНН или обратитесь в техподдержку для регистрации организации.\n"
+            f"Контакт: {support_link}",
+            reply_markup=seller_back_menu(),
+        )
         return
     await state.update_data(inn=inn)
     await state.set_state(SellerRegisterStates.password)
@@ -216,15 +242,4 @@ async def seller_fallback(message: Message, state: FSMContext) -> None:
     if user:
         await message.answer("Пожалуйста, выберите пункт меню.", reply_markup=seller_main_menu())
     else:
-        text = (message.text or "").strip()
-        if text:
-            parts = text.split()
-            if len(parts) >= 2 and validate_inn(parts[0]):
-                await _process_registration(message, state, parts[0], " ".join(parts[1:]))
-                return
-            if len(parts) == 1 and validate_inn(parts[0]):
-                await state.set_state(SellerRegisterStates.password)
-                await state.update_data(inn=parts[0])
-                await message.answer("Введите пароль организации.", reply_markup=seller_back_menu())
-                return
         await show_seller_start(message)

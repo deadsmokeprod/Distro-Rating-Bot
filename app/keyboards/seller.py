@@ -2,7 +2,8 @@ from __future__ import annotations
 
 from app.keyboards.common import BACK_TEXT, build_reply_keyboard
 
-SELLER_REGISTER = "✅ Зарегистрироваться"
+SELLER_COMPANY_YES = "✅ Да"
+SELLER_COMPANY_NO = "❌ Нет"
 SELLER_RETRY = "🔁 Попробовать снова"
 SELLER_SUPPORT = "🆘 Написать в поддержку"
 
@@ -11,7 +12,7 @@ SELLER_MENU_HELP = "ℹ️ Помощь"
 
 
 def seller_start_menu():
-    return build_reply_keyboard([SELLER_REGISTER])
+    return build_reply_keyboard([SELLER_COMPANY_YES, SELLER_COMPANY_NO])
 
 
 def seller_main_menu():
