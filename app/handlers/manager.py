@@ -4,7 +4,6 @@ import logging
 from math import ceil
 
 from aiogram import F, Router
-from aiogram.exceptions import SkipHandler
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.types import CallbackQuery, InlineKeyboardMarkup, Message
@@ -12,6 +11,7 @@ from aiogram.types import CallbackQuery, InlineKeyboardMarkup, Message
 from app.config import get_config
 from app.db import sqlite
 from app.handlers.start import is_manager, show_manager_menu
+from app.handlers.filters import ManagerFilter
 from app.keyboards.common import BACK_TEXT, build_inline_keyboard
 from app.keyboards.manager import (
     MANAGER_MENU_HELP,
@@ -37,6 +37,8 @@ from app.utils.validators import validate_inn, validate_org_name
 logger = logging.getLogger(__name__)
 
 router = Router()
+router.message.filter(ManagerFilter())
+router.callback_query.filter(ManagerFilter())
 
 PAGE_SIZE = 10
 
@@ -100,7 +102,7 @@ def _org_staff_keyboard(org_id: int, page: int, total_pages: int) -> InlineKeybo
 @router.message(F.text == MANAGER_MENU_REGISTER_ORG)
 async def manager_register_org(message: Message, state: FSMContext) -> None:
     if not is_manager(message.from_user.id):
-        raise SkipHandler
+        return
     await state.clear()
     await state.set_state(OrgCreateStates.inn)
     await message.answer("Введите ИНН организации (10 или 12 цифр).", reply_markup=manager_back_menu())
@@ -230,7 +232,7 @@ async def manager_org_confirm_fallback(message: Message) -> None:
 @router.message(F.text == ORG_CREATE_OPEN_CARD_FULL)
 async def manager_open_card_from_message(message: Message, state: FSMContext) -> None:
     if not is_manager(message.from_user.id):
-        raise SkipHandler
+        return
     data = await state.get_data()
     org_id = data.get("existing_org_id")
     if not org_id:
@@ -248,7 +250,7 @@ async def manager_back_to_menu(message: Message, state: FSMContext) -> None:
 @router.message(F.text == MANAGER_MENU_ORGS)
 async def manager_org_list(message: Message) -> None:
     if not is_manager(message.from_user.id):
-        raise SkipHandler
+        return
     await _send_org_list(message, page=0)
 
 
@@ -256,7 +258,7 @@ async def manager_org_list(message: Message) -> None:
 async def manager_org_list_page(callback: CallbackQuery) -> None:
     if not is_manager(callback.from_user.id):
         await callback.answer()
-        raise SkipHandler
+        return
     page = int(callback.data.split(":")[1])
     await _send_org_list(callback.message, page=page, edit=True)
     await callback.answer()
@@ -266,7 +268,7 @@ async def manager_org_list_page(callback: CallbackQuery) -> None:
 async def manager_org_back_menu(callback: CallbackQuery) -> None:
     if not is_manager(callback.from_user.id):
         await callback.answer()
-        raise SkipHandler
+        return
     await callback.message.answer("Вы вошли как Менеджер.", reply_markup=manager_main_menu())
     await callback.answer()
 
@@ -317,7 +319,7 @@ async def _send_org_card(
 async def manager_org_open(callback: CallbackQuery) -> None:
     if not is_manager(callback.from_user.id):
         await callback.answer()
-        raise SkipHandler
+        return
     _, org_id, page = callback.data.split(":")
     await _send_org_card(callback.message, callback.from_user.id, int(org_id), back_page=int(page))
     await callback.answer()
@@ -327,7 +329,7 @@ async def manager_org_open(callback: CallbackQuery) -> None:
 async def manager_org_staff(callback: CallbackQuery) -> None:
     if not is_manager(callback.from_user.id):
         await callback.answer()
-        raise SkipHandler
+        return
     _, org_id, page = callback.data.split(":")
     org_id = int(org_id)
     page = int(page)
@@ -359,7 +361,7 @@ async def manager_org_staff(callback: CallbackQuery) -> None:
 async def manager_org_reset(callback: CallbackQuery) -> None:
     if not is_manager(callback.from_user.id):
         await callback.answer()
-        raise SkipHandler
+        return
     _, org_id = callback.data.split(":")
     await callback.message.edit_text(
         "Сбросить пароль? Старый перестанет работать.",
@@ -372,7 +374,7 @@ async def manager_org_reset(callback: CallbackQuery) -> None:
 async def manager_org_reset_confirm(callback: CallbackQuery) -> None:
     if not is_manager(callback.from_user.id):
         await callback.answer()
-        raise SkipHandler
+        return
     _, org_id = callback.data.split(":")
     org_id_int = int(org_id)
     config = get_config()
@@ -401,7 +403,7 @@ async def manager_org_reset_confirm(callback: CallbackQuery) -> None:
 @router.message(F.text == MANAGER_MENU_HELP)
 async def manager_help(message: Message) -> None:
     if not is_manager(message.from_user.id):
-        raise SkipHandler
+        return
     config = get_config()
     support_link = f"<a href=\"tg://user?id={config.support_user_id}\">техподдержку</a>"
     await message.answer(
@@ -414,12 +416,12 @@ async def manager_help(message: Message) -> None:
 @router.message(F.text == BACK_TEXT)
 async def manager_back(message: Message) -> None:
     if not is_manager(message.from_user.id):
-        raise SkipHandler
+        return
     await show_manager_menu(message)
 
 
 @router.message()
 async def manager_fallback(message: Message) -> None:
     if not is_manager(message.from_user.id):
-        raise SkipHandler
+        return
     await message.answer("Пожалуйста, выберите пункт меню.", reply_markup=manager_main_menu())

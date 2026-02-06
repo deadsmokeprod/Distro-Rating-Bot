@@ -3,7 +3,6 @@ from __future__ import annotations
 import logging
 
 from aiogram import F, Router
-from aiogram.exceptions import SkipHandler
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.types import Message
@@ -11,6 +10,7 @@ from aiogram.types import Message
 from app.config import get_config
 from app.db import sqlite
 from app.handlers.start import is_manager, show_seller_menu, show_seller_start
+from app.handlers.filters import NonManagerFilter
 from app.keyboards.common import BACK_TEXT
 from app.keyboards.seller import (
     SELLER_COMPANY_NO,
@@ -31,6 +31,8 @@ from app.utils.validators import validate_inn
 logger = logging.getLogger(__name__)
 
 router = Router()
+router.message.filter(NonManagerFilter())
+router.callback_query.filter(NonManagerFilter())
 
 
 class SellerRegisterStates(StatesGroup):
@@ -84,7 +86,7 @@ async def _process_registration(
 
 async def _handle_company_yes(message: Message, state: FSMContext) -> None:
     if is_manager(message.from_user.id):
-        raise SkipHandler
+        return
     config = get_config()
     user = await sqlite.get_user_by_tg_id(config.db_path, message.from_user.id)
     if user:
@@ -97,7 +99,7 @@ async def _handle_company_yes(message: Message, state: FSMContext) -> None:
 
 async def _handle_company_no(message: Message, state: FSMContext) -> None:
     if is_manager(message.from_user.id):
-        raise SkipHandler
+        return
     await state.clear()
     config = get_config()
     support_link = f"<a href=\"tg://user?id={config.support_user_id}\">техподдержку</a>"
@@ -173,7 +175,7 @@ async def seller_register_password_input(message: Message, state: FSMContext) ->
 @router.message(F.text == SELLER_RETRY)
 async def seller_retry(message: Message, state: FSMContext) -> None:
     if is_manager(message.from_user.id):
-        raise SkipHandler
+        return
     config = get_config()
     user = await sqlite.get_user_by_tg_id(config.db_path, message.from_user.id)
     if user:
@@ -186,7 +188,7 @@ async def seller_retry(message: Message, state: FSMContext) -> None:
 @router.message(F.text == SELLER_SUPPORT)
 async def seller_support(message: Message) -> None:
     if is_manager(message.from_user.id):
-        raise SkipHandler
+        return
     config = get_config()
     support_link = f"<a href=\"tg://user?id={config.support_user_id}\">техподдержку</a>"
     await message.answer(f"Контакт поддержки: {support_link}", reply_markup=seller_retry_menu())
@@ -195,7 +197,7 @@ async def seller_support(message: Message) -> None:
 @router.message(F.text == SELLER_MENU_PROFILE)
 async def seller_profile(message: Message) -> None:
     if is_manager(message.from_user.id):
-        raise SkipHandler
+        return
     config = get_config()
     user = await sqlite.get_user_by_tg_id(config.db_path, message.from_user.id)
     if not user:
@@ -221,7 +223,7 @@ async def seller_profile(message: Message) -> None:
 @router.message(F.text == SELLER_MENU_HELP)
 async def seller_help(message: Message) -> None:
     if is_manager(message.from_user.id):
-        raise SkipHandler
+        return
     config = get_config()
     support_link = f"<a href=\"tg://user?id={config.support_user_id}\">техподдержку</a>"
     await message.answer(
@@ -234,7 +236,7 @@ async def seller_help(message: Message) -> None:
 @router.message(F.text == BACK_TEXT)
 async def seller_back(message: Message) -> None:
     if is_manager(message.from_user.id):
-        raise SkipHandler
+        return
     config = get_config()
     user = await sqlite.get_user_by_tg_id(config.db_path, message.from_user.id)
     if user:
@@ -246,7 +248,7 @@ async def seller_back(message: Message) -> None:
 @router.message()
 async def seller_fallback(message: Message, state: FSMContext) -> None:
     if is_manager(message.from_user.id):
-        raise SkipHandler
+        return
     config = get_config()
     user = await sqlite.get_user_by_tg_id(config.db_path, message.from_user.id)
     if user:
