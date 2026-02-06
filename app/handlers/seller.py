@@ -39,6 +39,46 @@ async def _send_error(message: Message) -> None:
     await message.answer("Произошла ошибка, попробуйте позже.", reply_markup=seller_back_menu())
 
 
+async def _process_registration(
+    message: Message, state: FSMContext, inn: str, password: str
+) -> None:
+    config = get_config()
+    try:
+        org = await sqlite.get_org_by_inn(config.db_path, inn)
+        if not org or not verify_password(password, org["password_hash"]):
+            support_link = (
+                f"<a href=\"tg://user?id={config.support_user_id}\">техподдержку</a>"
+            )
+            await message.answer(
+                "Данные неверные.\n"
+                "Проверьте ИНН и пароль. Если пароль не подходит — обратитесь в техподдержку.\n"
+                f"Контакт: {support_link}",
+                reply_markup=seller_retry_menu(),
+            )
+            return
+        registered_at = now_utc_iso()
+        await sqlite.create_user(
+            config.db_path,
+            tg_user_id=message.from_user.id,
+            org_id=int(org["id"]),
+            registered_at=registered_at,
+            last_seen_at=registered_at,
+        )
+        await sqlite.log_audit(
+            config.db_path,
+            actor_tg_user_id=message.from_user.id,
+            actor_role="seller",
+            action="SELLER_REGISTER",
+            payload={"org_id": int(org["id"]), "inn": inn},
+        )
+        await state.clear()
+        await message.answer("Регистрация завершена ✅")
+        await show_seller_menu(message)
+    except Exception:
+        logger.exception("Failed to register seller")
+        await _send_error(message)
+
+
 @router.message(F.text == SELLER_REGISTER)
 async def seller_register_start(message: Message, state: FSMContext) -> None:
     if is_manager(message.from_user.id):
@@ -91,41 +131,7 @@ async def seller_register_password_input(message: Message, state: FSMContext) ->
         await state.set_state(SellerRegisterStates.inn)
         await message.answer("Введите ИНН организации (10 или 12 цифр).", reply_markup=seller_back_menu())
         return
-    config = get_config()
-    try:
-        org = await sqlite.get_org_by_inn(config.db_path, inn)
-        if not org or not verify_password(password, org["password_hash"]):
-            support_link = (
-                f"<a href=\"tg://user?id={config.support_user_id}\">техподдержку</a>"
-            )
-            await message.answer(
-                "Данные неверные.\n"
-                "Проверьте ИНН и пароль. Если пароль не подходит — обратитесь в техподдержку.\n"
-                f"Контакт: {support_link}",
-                reply_markup=seller_retry_menu(),
-            )
-            return
-        registered_at = now_utc_iso()
-        await sqlite.create_user(
-            config.db_path,
-            tg_user_id=message.from_user.id,
-            org_id=int(org["id"]),
-            registered_at=registered_at,
-            last_seen_at=registered_at,
-        )
-        await sqlite.log_audit(
-            config.db_path,
-            actor_tg_user_id=message.from_user.id,
-            actor_role="seller",
-            action="SELLER_REGISTER",
-            payload={"org_id": int(org["id"]), "inn": inn},
-        )
-        await state.clear()
-        await message.answer("Регистрация завершена ✅")
-        await show_seller_menu(message)
-    except Exception:
-        logger.exception("Failed to register seller")
-        await _send_error(message)
+    await _process_registration(message, state, inn, password)
 
 
 @router.message(F.text == SELLER_RETRY)
@@ -202,7 +208,7 @@ async def seller_back(message: Message) -> None:
 
 
 @router.message()
-async def seller_fallback(message: Message) -> None:
+async def seller_fallback(message: Message, state: FSMContext) -> None:
     if is_manager(message.from_user.id):
         return
     config = get_config()
@@ -210,4 +216,15 @@ async def seller_fallback(message: Message) -> None:
     if user:
         await message.answer("Пожалуйста, выберите пункт меню.", reply_markup=seller_main_menu())
     else:
+        text = (message.text or "").strip()
+        if text:
+            parts = text.split()
+            if len(parts) >= 2 and validate_inn(parts[0]):
+                await _process_registration(message, state, parts[0], " ".join(parts[1:]))
+                return
+            if len(parts) == 1 and validate_inn(parts[0]):
+                await state.set_state(SellerRegisterStates.password)
+                await state.update_data(inn=parts[0])
+                await message.answer("Введите пароль организации.", reply_markup=seller_back_menu())
+                return
         await show_seller_start(message)
