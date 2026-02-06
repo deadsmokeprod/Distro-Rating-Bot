@@ -81,8 +81,7 @@ async def _process_registration(
         await _send_error(message)
 
 
-@router.message(F.text.in_({SELLER_COMPANY_YES, "Да", "ДА", "да"}))
-async def seller_register_start(message: Message, state: FSMContext) -> None:
+async def _handle_company_yes(message: Message, state: FSMContext) -> None:
     if is_manager(message.from_user.id):
         return
     config = get_config()
@@ -95,8 +94,7 @@ async def seller_register_start(message: Message, state: FSMContext) -> None:
     await message.answer("Введите ИНН организации (10 или 12 цифр).", reply_markup=seller_back_menu())
 
 
-@router.message(F.text.in_({SELLER_COMPANY_NO, "Нет", "НЕТ", "нет"}))
-async def seller_company_no(message: Message, state: FSMContext) -> None:
+async def _handle_company_no(message: Message, state: FSMContext) -> None:
     if is_manager(message.from_user.id):
         return
     await state.clear()
@@ -107,6 +105,16 @@ async def seller_company_no(message: Message, state: FSMContext) -> None:
         f"Контакт: {support_link}",
         reply_markup=seller_back_menu(),
     )
+
+
+@router.message(F.text.in_({SELLER_COMPANY_YES, "Да", "ДА", "да"}))
+async def seller_register_start(message: Message, state: FSMContext) -> None:
+    await _handle_company_yes(message, state)
+
+
+@router.message(F.text.in_({SELLER_COMPANY_NO, "Нет", "НЕТ", "нет"}))
+async def seller_company_no(message: Message, state: FSMContext) -> None:
+    await _handle_company_no(message, state)
 
 
 @router.message(SellerRegisterStates.inn, F.text == BACK_TEXT)
@@ -243,4 +251,12 @@ async def seller_fallback(message: Message, state: FSMContext) -> None:
     if user:
         await message.answer("Пожалуйста, выберите пункт меню.", reply_markup=seller_main_menu())
     else:
+        text = (message.text or "").strip().lower()
+        normalized = text.replace("✅", "").replace("❌", "").strip()
+        if normalized == "да":
+            await _handle_company_yes(message, state)
+            return
+        if normalized == "нет":
+            await _handle_company_no(message, state)
+            return
         await message.answer("Пожалуйста, выберите «Да» или «Нет».", reply_markup=seller_start_menu())
