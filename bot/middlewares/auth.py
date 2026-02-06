@@ -20,6 +20,11 @@ class AuthMiddleware(BaseMiddleware):
             return await handler(event, data)
         if event.text and event.text.strip().startswith("/start"):
             return await handler(event, data)
+        state = data.get("state")
+        if state:
+            current = await state.get_state()
+            if current:
+                return await handler(event, data)
         allow = data.get("allow_unauthorized")
         if allow:
             return await handler(event, data)
