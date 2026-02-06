@@ -24,6 +24,10 @@ class AuthMiddleware(BaseMiddleware):
         if state:
             current = await state.get_state()
             if current:
+                async with self.session_factory() as session:
+                    user = await get_user_by_tg(session, event.from_user.id)
+                if user:
+                    data["user"] = user
                 return await handler(event, data)
         allow = data.get("allow_unauthorized")
         if allow:
