@@ -83,7 +83,7 @@ async def _totals_for_period(db_path: str, start: date | None, end: date | None)
                 u.org_id AS org_id,
                 COALESCE(u.full_name, '') AS full_name,
                 COALESCE(SUM(CASE
-                    WHEN t.period BETWEEN ? AND ? THEN t.volume_goods
+                    WHEN substr(c.claimed_at, 1, 10) BETWEEN ? AND ? THEN t.volume_goods
                 END), 0) AS total_volume
             FROM users u
             LEFT JOIN sales_claims c ON c.claimed_by_tg_user_id = u.tg_user_id

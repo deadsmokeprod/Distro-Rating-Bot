@@ -22,9 +22,13 @@ from app.keyboards.manager import (
     MANAGER_MENU_ORGS,
     MANAGER_MENU_REGISTER_ORG,
     MANAGER_MENU_EXPORT_RATINGS,
+    MANAGER_MENU_BROADCAST,
     MANAGER_MENU_SYNC,
     MANAGER_SYNC_CURRENT_MONTH,
     MANAGER_SYNC_CUSTOM_RANGE,
+    MANAGER_BROADCAST_ALL,
+    MANAGER_BROADCAST_MY_ORGS,
+    MANAGER_BROADCAST_CONFIRM,
     ORG_ACTION_RESET_PASSWORD,
     ORG_ACTION_STAFF,
     ORG_CREATE_BACK_TO_MENU,
@@ -34,6 +38,8 @@ from app.keyboards.manager import (
     ORG_RESET_CONFIRM,
     manager_back_menu,
     manager_main_menu,
+    manager_broadcast_target_menu,
+    manager_broadcast_confirm_menu,
     manager_sync_menu,
     org_create_confirm_menu,
     org_created_menu,
@@ -42,8 +48,19 @@ from app.keyboards.manager import (
 )
 from app.services.onec_client import OnecClientError
 from app.services.turnover_sync import current_month_range, moscow_today, sync_turnover
-from app.services.ratings import month_str, moscow_today as moscow_today_ratings
+from app.services.ratings import (
+    month_str,
+    moscow_today as moscow_today_ratings,
+    current_month_rankings,
+    get_all_time_for_user,
+    get_monthly_snapshot_for_user,
+    previous_month,
+    recalc_all_time_ratings,
+)
 from app.services.ratings_export import build_ratings_excel
+from app.services.leagues import compute_league
+from app.services.challenges import get_current_challenge
+from app.utils.time import format_iso_human
 from app.utils.security import generate_password, hash_password
 from app.utils.validators import validate_inn, validate_org_name
 
@@ -69,6 +86,12 @@ class ManagerSyncStates(StatesGroup):
 
 class ManagerExportStates(StatesGroup):
     period = State()
+
+
+class ManagerBroadcastStates(StatesGroup):
+    target = State()
+    message = State()
+    confirm = State()
 
 
 async def _send_error(message: Message) -> None:
@@ -111,8 +134,17 @@ def _org_reset_confirm_keyboard(org_id: int) -> InlineKeyboardMarkup:
     return build_inline_keyboard(buttons)
 
 
-def _org_staff_keyboard(org_id: int, page: int, total_pages: int) -> InlineKeyboardMarkup:
+def _org_staff_keyboard(
+    org_id: int, page: int, total_pages: int, sellers: list
+) -> InlineKeyboardMarkup:
     buttons: list[tuple[str, str]] = []
+    for row in sellers:
+        full_name = (row["full_name"] or "").strip()
+        tg_user_id = int(row["tg_user_id"])
+        label = f"{full_name} | {tg_user_id}" if full_name else f"ID {tg_user_id}"
+        if len(label) > 64:
+            label = label[:61] + "..."
+        buttons.append((label, f"staff:{org_id}:{tg_user_id}:{page}"))
     if page > 0:
         buttons.append(("◀️", f"org_staff:{org_id}:{page - 1}"))
     if page < total_pages - 1:
@@ -162,6 +194,88 @@ async def manager_register_org(message: Message, state: FSMContext) -> None:
     await state.clear()
     await state.set_state(OrgCreateStates.inn)
     await message.answer("Введите ИНН организации (10 или 12 цифр).", reply_markup=manager_back_menu())
+
+
+@router.message(F.text == MANAGER_MENU_BROADCAST)
+async def manager_broadcast_start(message: Message, state: FSMContext) -> None:
+    await state.clear()
+    await state.set_state(ManagerBroadcastStates.target)
+    await message.answer(
+        "Кому отправить сообщение?",
+        reply_markup=manager_broadcast_target_menu(),
+    )
+
+
+@router.message(ManagerBroadcastStates.target, F.text == BACK_TEXT)
+async def manager_broadcast_back(message: Message, state: FSMContext) -> None:
+    await state.clear()
+    await show_manager_menu(message)
+
+
+@router.message(ManagerBroadcastStates.target, F.text.in_({MANAGER_BROADCAST_ALL, MANAGER_BROADCAST_MY_ORGS}))
+async def manager_broadcast_target(message: Message, state: FSMContext) -> None:
+    target = "all" if message.text == MANAGER_BROADCAST_ALL else "my_orgs"
+    await state.update_data(target=target)
+    await state.set_state(ManagerBroadcastStates.message)
+    await message.answer("Введите текст рассылки.", reply_markup=manager_back_menu())
+
+
+@router.message(ManagerBroadcastStates.message, F.text == BACK_TEXT)
+async def manager_broadcast_message_back(message: Message, state: FSMContext) -> None:
+    await state.set_state(ManagerBroadcastStates.target)
+    await message.answer("Кому отправить сообщение?", reply_markup=manager_broadcast_target_menu())
+
+
+@router.message(ManagerBroadcastStates.message)
+async def manager_broadcast_message(message: Message, state: FSMContext) -> None:
+    if not message.text:
+        await message.answer("Введите текст рассылки или нажмите ⬅️ Назад.")
+        return
+    await state.update_data(text=message.text.strip())
+    await state.set_state(ManagerBroadcastStates.confirm)
+    await message.answer(
+        "Отправить это сообщение?",
+        reply_markup=manager_broadcast_confirm_menu(),
+    )
+
+
+@router.message(ManagerBroadcastStates.confirm, F.text == BACK_TEXT)
+async def manager_broadcast_confirm_back(message: Message, state: FSMContext) -> None:
+    await state.set_state(ManagerBroadcastStates.message)
+    await message.answer("Введите текст рассылки.", reply_markup=manager_back_menu())
+
+
+@router.message(ManagerBroadcastStates.confirm, F.text == MANAGER_BROADCAST_CONFIRM)
+async def manager_broadcast_send(message: Message, state: FSMContext) -> None:
+    data = await state.get_data()
+    target = data.get("target")
+    text = data.get("text")
+    if not text:
+        await message.answer("Текст рассылки пуст.", reply_markup=manager_main_menu())
+        await state.clear()
+        return
+    config = get_config()
+    if target == "all":
+        recipients = await sqlite.list_all_seller_ids(config.db_path)
+    else:
+        recipients = await sqlite.list_seller_ids_by_manager(config.db_path, message.from_user.id)
+    sent = 0
+    for tg_user_id in recipients:
+        try:
+            await message.bot.send_message(tg_user_id, text)
+            sent += 1
+        except Exception:
+            logger.exception("Failed to send broadcast to %s", tg_user_id)
+            continue
+    await sqlite.log_audit(
+        config.db_path,
+        actor_tg_user_id=message.from_user.id,
+        actor_role="manager",
+        action="MANAGER_BROADCAST",
+        payload={"target": target, "sent": sent},
+    )
+    await state.clear()
+    await message.answer(f"Рассылка завершена. Отправлено: {sent}", reply_markup=manager_main_menu())
 
 
 @router.message(F.text == MANAGER_MENU_EXPORT_RATINGS)
@@ -536,6 +650,106 @@ async def manager_org_open(callback: CallbackQuery) -> None:
     await callback.answer()
 
 
+def _escape_html(text: str) -> str:
+    return (
+        text.replace("&", "&amp;")
+        .replace("<", "&lt;")
+        .replace(">", "&gt;")
+    )
+
+
+@router.callback_query(F.data.startswith("staff:"))
+async def manager_staff_profile(callback: CallbackQuery) -> None:
+    if not is_manager(callback.from_user.id):
+        await callback.answer()
+        return
+    parts = callback.data.split(":")
+    if len(parts) != 4:
+        await callback.answer()
+        return
+    _, org_id_s, tg_user_id_s, staff_page_s = parts
+    org_id = int(org_id_s)
+    target_tg_user_id = int(tg_user_id_s)
+    staff_page = int(staff_page_s)
+    config = get_config()
+    org = await sqlite.get_org_by_id(config.db_path, org_id)
+    if not org or int(org["created_by_manager_id"]) != callback.from_user.id:
+        await callback.message.answer("Организация не найдена.", reply_markup=manager_main_menu())
+        await callback.answer()
+        return
+    user = await sqlite.get_user_by_tg_id(config.db_path, target_tg_user_id)
+    if not user or int(user["org_id"]) != org_id:
+        await callback.answer("Сотрудник не найден.")
+        return
+    await recalc_all_time_ratings(config.db_path)
+    all_time = await get_all_time_for_user(config.db_path, target_tg_user_id) or {
+        "total_volume": 0,
+        "global_rank": 0,
+        "company_rank": 0,
+    }
+    today = moscow_today_ratings()
+    prev_month = previous_month(today)
+    prev_snapshot = await get_monthly_snapshot_for_user(
+        config.db_path, prev_month, target_tg_user_id
+    ) or {"total_volume": 0, "global_rank": 0, "company_rank": 0}
+    league = compute_league(
+        await current_month_rankings(config.db_path), target_tg_user_id
+    )
+    challenge = await get_current_challenge(config, target_tg_user_id)
+    challenge_line = ""
+    if challenge:
+        if challenge.completed:
+            challenge_line = "Челлендж выполнен ✅\n"
+        else:
+            challenge_line = (
+                f"Челлендж: {challenge.progress_volume:g}/{challenge.target_volume:g} л\n"
+            )
+    league_line = f"Лига: {league.name}"
+    if league.to_next_volume is not None:
+        league_line += f", до повышения {league.to_next_volume:g} л"
+    registered_at = format_iso_human(user["registered_at"])
+    has_req = await sqlite.has_requisites(config.db_path, target_tg_user_id)
+    requisites_line = "Реквизиты указаны: Да" if has_req else "Реквизиты указаны: Нет"
+    full_name = (user["full_name"] or "").strip() or f"ID {target_tg_user_id}"
+    profile_text = (
+        "Профиль сотрудника:\n"
+        f"ФИО: {_escape_html(full_name)}\n"
+        f"ID: {target_tg_user_id}\n"
+        f"Дата регистрации: {registered_at}\n"
+        f"{requisites_line}\n\n"
+        + challenge_line
+        + league_line
+        + "\n\n"
+        "Рейтинг за всё время: "
+        f"{all_time['total_volume']} (в прошлом месяце было {prev_snapshot['total_volume']})\n"
+        "Место в мировом рейтинге: "
+        f"{all_time['global_rank']} (в прошлом месяце было {prev_snapshot['global_rank']})\n"
+        "Место в рейтинге компании: "
+        f"{all_time['company_rank']} (в прошлом месяце было {prev_snapshot['company_rank']})"
+    )
+    history = await sqlite.get_requisites_history(config.db_path, target_tg_user_id)
+    if history:
+        profile_text += "\n\n——— История реквизитов ———\n"
+        for i, row in enumerate(history):
+            dt = format_iso_human(row["created_at"])
+            content = _escape_html(str(row["content"]))
+            if i == 0:
+                profile_text += f"\n<b>{dt}</b>\n<b>{content}</b>\n"
+            else:
+                profile_text += f"\n{dt}\n{content}\n"
+    else:
+        profile_text += "\n\n——— История реквизитов ———\nНет записей."
+    back_kb = build_inline_keyboard([
+        ("⬅️ Назад к списку", f"org_staff:{org_id}:{staff_page}"),
+    ])
+    await callback.message.edit_text(
+        profile_text,
+        reply_markup=back_kb,
+        parse_mode="HTML",
+    )
+    await callback.answer()
+
+
 @router.callback_query(F.data.startswith("org_staff"))
 async def manager_org_staff(callback: CallbackQuery) -> None:
     if not is_manager(callback.from_user.id):
@@ -557,13 +771,10 @@ async def manager_org_staff(callback: CallbackQuery) -> None:
         config.db_path, org_id, PAGE_SIZE, page * PAGE_SIZE
     )
     if sellers:
-        lines = [
-            f"{row['tg_user_id']} — {row['registered_at']}" for row in sellers
-        ]
-        text = "Сотрудники:\n" + "\n".join(lines)
+        text = "Сотрудники (нажмите на сотрудника для просмотра профиля и истории реквизитов):"
     else:
         text = "Сотрудники не зарегистрированы."
-    keyboard = _org_staff_keyboard(org_id, page, total_pages)
+    keyboard = _org_staff_keyboard(org_id, page, total_pages, sellers)
     await callback.message.edit_text(text, reply_markup=keyboard)
     await callback.answer()
 

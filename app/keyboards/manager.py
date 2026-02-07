@@ -6,6 +6,7 @@ MANAGER_MENU_REGISTER_ORG = "➕ Зарегистрировать организ
 MANAGER_MENU_ORGS = "📋 Мои организации"
 MANAGER_MENU_SYNC = "🔄 Обновить базу"
 MANAGER_MENU_EXPORT_RATINGS = "📤 Выгрузить рейтинги в EXCEL"
+MANAGER_MENU_BROADCAST = "📣 Рассылка продавцам"
 MANAGER_MENU_HELP = "ℹ️ Помощь"
 
 ORG_CREATE_CONFIRM = "✅ Создать"
@@ -26,9 +27,23 @@ def manager_main_menu():
             MANAGER_MENU_ORGS,
             MANAGER_MENU_SYNC,
             MANAGER_MENU_EXPORT_RATINGS,
+            MANAGER_MENU_BROADCAST,
             MANAGER_MENU_HELP,
         ]
     )
+
+
+MANAGER_BROADCAST_ALL = "Всем продавцам"
+MANAGER_BROADCAST_MY_ORGS = "Продавцам моих компаний"
+MANAGER_BROADCAST_CONFIRM = "Отправить"
+
+
+def manager_broadcast_target_menu():
+    return build_reply_keyboard([MANAGER_BROADCAST_ALL, MANAGER_BROADCAST_MY_ORGS, BACK_TEXT])
+
+
+def manager_broadcast_confirm_menu():
+    return build_reply_keyboard([MANAGER_BROADCAST_CONFIRM, BACK_TEXT])
 
 
 def manager_back_menu():

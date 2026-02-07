@@ -15,6 +15,10 @@ class Config:
     support_user_id: int
     support_username: str | None  # без @, для кнопки https://t.me/username
     onec_url: str | None
+    challenge_growth_pct: int
+    challenge_base_volume: float
+    quiet_hours_start: str
+    quiet_hours_end: str
     db_path: str
     log_path: str
 
@@ -43,6 +47,10 @@ def load_config() -> Config:
     support_username = support_username_raw or None
     onec_url_raw = (os.getenv("ONEC_URL", "") or "").strip()
     onec_url = onec_url_raw or None
+    challenge_growth_pct = int(os.getenv("CHALLENGE_GROWTH_PCT", "20"))
+    challenge_base_volume = float(os.getenv("CHALLENGE_BASE_VOLUME", "10"))
+    quiet_hours_start = (os.getenv("QUIET_HOURS_START", "19:00") or "19:00").strip()
+    quiet_hours_end = (os.getenv("QUIET_HOURS_END", "08:00") or "08:00").strip()
     db_path = os.getenv("DB_PATH", "./data/bot.sqlite3").strip()
     log_path = os.getenv("LOG_PATH", "./logs/bot.log").strip()
 
@@ -62,6 +70,10 @@ def load_config() -> Config:
         support_user_id=support_user_id,
         support_username=support_username,
         onec_url=onec_url,
+        challenge_growth_pct=challenge_growth_pct,
+        challenge_base_volume=challenge_base_volume,
+        quiet_hours_start=quiet_hours_start,
+        quiet_hours_end=quiet_hours_end,
         db_path=db_path,
         log_path=log_path,
     )

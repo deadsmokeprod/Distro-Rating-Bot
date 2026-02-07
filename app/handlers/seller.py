@@ -24,12 +24,14 @@ from app.keyboards.seller import (
     SELLER_MENU_HELP,
     SELLER_MENU_GLOBAL_RATING,
     SELLER_MENU_PROFILE,
+    SELLER_MENU_REQUISITES,
     SELLER_MENU_COMPANY_RATING,
     SELLER_MENU_SALES,
     SELLER_RETRY,
     SELLER_SUPPORT,
     seller_back_menu,
     seller_main_menu,
+    seller_profile_menu,
     seller_retry_menu,
     seller_support_menu,
     seller_start_menu,
@@ -45,6 +47,8 @@ from app.services.ratings import (
     previous_month,
     recalc_all_time_ratings,
 )
+from app.services.challenges import get_current_challenge, update_challenge_progress
+from app.services.leagues import compute_league
 
 logger = logging.getLogger(__name__)
 
@@ -57,6 +61,10 @@ class SellerRegisterStates(StatesGroup):
     inn = State()
     password = State()
     full_name = State()
+
+
+class RequisitesStates(StatesGroup):
+    wait_text = State()
 
 
 SALES_PAGE_SIZE = 10
@@ -133,16 +141,23 @@ def _build_rating_window(rows: list, current_id: int) -> list:
 
 
 def _render_rating_list(
-    title: str, rows: list, current_id: int, use_company_rank: bool
+    title: str,
+    rows: list,
+    current_id: int,
+    use_company_rank: bool,
+    league_map: dict[int, str] | None = None,
 ) -> str:
     if not rows:
         return f"{title}\nНет данных."
     window = _build_rating_window(rows, current_id)
-    lines = [title, "Место | Рейтинг | ФИО"]
+    lines = [title, "Место | Рейтинг | ФИО | Лига"]
     for r in window:
         rank = r.company_rank if use_company_rank else r.global_rank
         name = _format_name(r.full_name, r.tg_user_id)
-        line = f"{rank} | {r.total_volume:g} | {name}"
+        league_suffix = ""
+        if league_map and r.tg_user_id in league_map:
+            league_suffix = f" ({league_map[r.tg_user_id]})"
+        line = f"{rank} | {r.total_volume:g} | {name}{league_suffix}"
         if r.tg_user_id == current_id:
             line = f"<b>{line}</b>"
         lines.append(line)
@@ -237,7 +252,7 @@ async def _handle_company_yes(message: Message, state: FSMContext) -> None:
     config = get_config()
     user = await sqlite.get_user_by_tg_id(config.db_path, message.from_user.id)
     if user:
-        await show_seller_menu(message)
+        await show_seller_menu(message, message.from_user.id)
         return
     await state.clear()
     await state.set_state(SellerRegisterStates.inn)
@@ -416,18 +431,81 @@ async def seller_profile(message: Message) -> None:
         config.db_path, prev_month, message.from_user.id
     ) or {"total_volume": 0, "global_rank": 0, "company_rank": 0}
 
+    league = compute_league(await current_month_rankings(config.db_path), message.from_user.id)
+    challenge = await get_current_challenge(config, message.from_user.id)
+    challenge_line = ""
+    if challenge:
+        if challenge.completed:
+            challenge_line = "Челлендж выполнен ✅\n"
+        else:
+            challenge_line = (
+                f"Челлендж: {challenge.progress_volume:g}/{challenge.target_volume:g} л\n"
+            )
+    league_line = f"Лига: {league.name}"
+    if league.to_next_volume is not None:
+        league_line += f", до повышения {league.to_next_volume:g} л"
+
+    has_req = await sqlite.has_requisites(config.db_path, message.from_user.id)
+    requisites_line = "Реквизиты указаны: Да" if has_req else "Реквизиты указаны: Нет"
+
     await message.answer(
         "Профиль:\n"
         f"ID: {message.from_user.id}\n"
-        f"Дата регистрации: {registered_at}\n\n"
+        f"Дата регистрации: {registered_at}\n"
+        f"{requisites_line}\n\n"
+        + challenge_line
+        + league_line
+        + "\n\n"
         "Мой рейтинг за всё время: "
         f"{all_time['total_volume']} (в прошлом месяце было {prev_snapshot['total_volume']})\n"
         "Место в мировом рейтинге: "
         f"{all_time['global_rank']} (в прошлом месяце было {prev_snapshot['global_rank']})\n"
         "Место в рейтинге компании: "
         f"{all_time['company_rank']} (в прошлом месяце было {prev_snapshot['company_rank']})",
+        reply_markup=seller_profile_menu(),
+    )
+
+
+@router.message(F.text == SELLER_MENU_REQUISITES)
+async def seller_requisites_start(message: Message, state: FSMContext) -> None:
+    if is_manager(message.from_user.id):
+        return
+    config = get_config()
+    user = await sqlite.get_user_by_tg_id(config.db_path, message.from_user.id)
+    if not user:
+        await show_seller_start(message)
+        return
+    await state.set_state(RequisitesStates.wait_text)
+    await message.answer(
+        "Введите реквизиты для обновления. Текст будет сохранён; отображаться он не будет.",
         reply_markup=seller_back_menu(),
     )
+
+
+@router.message(RequisitesStates.wait_text, F.text == BACK_TEXT)
+async def seller_requisites_back(message: Message, state: FSMContext) -> None:
+    await state.clear()
+    await show_seller_menu(message)
+
+
+@router.message(RequisitesStates.wait_text, F.text)
+async def seller_requisites_save(message: Message, state: FSMContext) -> None:
+    if is_manager(message.from_user.id):
+        return
+    if not message.text or not message.text.strip():
+        await message.answer("Введите текст реквизитов или нажмите ⬅️ Назад.")
+        return
+    config = get_config()
+    await sqlite.add_requisites(config.db_path, message.from_user.id, message.text.strip())
+    await sqlite.log_audit(
+        config.db_path,
+        actor_tg_user_id=message.from_user.id,
+        actor_role="seller",
+        action="REQUISITES_UPDATE",
+        payload=None,
+    )
+    await state.clear()
+    await message.answer("Реквизиты обновлены.", reply_markup=seller_main_menu())
 
 
 @router.message(F.text == SELLER_MENU_HELP)
@@ -459,8 +537,21 @@ async def seller_global_rating(message: Message) -> None:
         return
     config = get_config()
     rows = await current_month_rankings(config.db_path)
-    text = _render_rating_list(
-        "Мировой рейтинг этого месяца", rows, message.from_user.id, use_company_rank=False
+    league_map = {r.tg_user_id: compute_league(rows, r.tg_user_id).name for r in rows}
+    league = compute_league(rows, message.from_user.id)
+    league_line = f"Лига: {league.name}"
+    if league.to_next_volume is not None:
+        league_line += f", до повышения {league.to_next_volume:g} л"
+    text = (
+        _render_rating_list(
+            "Мировой рейтинг этого месяца",
+            rows,
+            message.from_user.id,
+            use_company_rank=False,
+            league_map=league_map,
+        )
+        + "\n"
+        + league_line
     )
     await message.answer(text, reply_markup=seller_back_menu())
 
@@ -475,10 +566,24 @@ async def seller_company_rating(message: Message) -> None:
         await show_seller_start(message)
         return
     org_id = int(user["org_id"])
-    rows = [r for r in await current_month_rankings(config.db_path) if r.org_id == org_id]
+    all_rows = await current_month_rankings(config.db_path)
+    league_map = {r.tg_user_id: compute_league(all_rows, r.tg_user_id).name for r in all_rows}
+    rows = [r for r in all_rows if r.org_id == org_id]
     rows = sorted(rows, key=lambda r: r.company_rank)
-    text = _render_rating_list(
-        "Рейтинг компании за этот месяц", rows, message.from_user.id, use_company_rank=True
+    league = compute_league(await current_month_rankings(config.db_path), message.from_user.id)
+    league_line = f"Лига: {league.name}"
+    if league.to_next_volume is not None:
+        league_line += f", до повышения {league.to_next_volume:g} л"
+    text = (
+        _render_rating_list(
+            "Рейтинг компании за этот месяц",
+            rows,
+            message.from_user.id,
+            use_company_rank=True,
+            league_map=league_map,
+        )
+        + "\n"
+        + league_line
     )
     await message.answer(text, reply_markup=seller_back_menu())
 
@@ -486,7 +591,7 @@ async def seller_company_rating(message: Message) -> None:
 @router.callback_query(F.data == "sale_back_menu")
 async def seller_sales_back_menu(callback: CallbackQuery) -> None:
     await callback.answer()
-    await show_seller_menu(callback.message)
+    await show_seller_menu(callback.message, callback.from_user.id)
 
 
 @router.callback_query(F.data.startswith("sale_page:"))
@@ -563,6 +668,7 @@ async def seller_sales_confirm(callback: CallbackQuery) -> None:
     try:
         await sqlite.claim_turnover(config.db_path, turnover_id, callback.from_user.id)
         await recalc_all_time_ratings(config.db_path)
+        challenge, just_completed = await update_challenge_progress(config, callback.from_user.id)
         await sqlite.log_audit(
             config.db_path,
             actor_tg_user_id=callback.from_user.id,
@@ -570,6 +676,8 @@ async def seller_sales_confirm(callback: CallbackQuery) -> None:
             action="CLAIM_TURNOVER",
             payload={"turnover_id": turnover_id},
         )
+        if just_completed:
+            await callback.message.answer("Челлендж выполнен ✅")
         await _render_sales_list(
             callback.message,
             seller_inn,
@@ -595,7 +703,7 @@ async def seller_back(message: Message) -> None:
     config = get_config()
     user = await sqlite.get_user_by_tg_id(config.db_path, message.from_user.id)
     if user:
-        await show_seller_menu(message)
+        await show_seller_menu(message, message.from_user.id)
         return
     await show_seller_start(message)
 

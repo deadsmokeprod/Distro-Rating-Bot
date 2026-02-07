@@ -112,6 +112,45 @@ async def init_db(db_path: str) -> None:
             )
             """
         )
+        await db.execute(
+            """
+            CREATE TABLE IF NOT EXISTS challenges_biweekly (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                tg_user_id INTEGER NOT NULL,
+                period_start TEXT NOT NULL,
+                period_end TEXT NOT NULL,
+                target_volume REAL NOT NULL,
+                progress_volume REAL NOT NULL,
+                completed INTEGER NOT NULL DEFAULT 0,
+                updated_at TEXT NOT NULL,
+                UNIQUE (tg_user_id, period_start, period_end)
+            )
+            """
+        )
+        await db.execute(
+            """
+            CREATE TABLE IF NOT EXISTS notifications (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                tg_user_id INTEGER NOT NULL,
+                kind TEXT NOT NULL,
+                context_json TEXT,
+                scheduled_at TEXT,
+                sent_at TEXT,
+                status TEXT NOT NULL,
+                created_at TEXT NOT NULL
+            )
+            """
+        )
+        await db.execute(
+            """
+            CREATE TABLE IF NOT EXISTS requisites_history (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                tg_user_id INTEGER NOT NULL,
+                content TEXT NOT NULL,
+                created_at TEXT NOT NULL
+            )
+            """
+        )
         await db.execute("CREATE INDEX IF NOT EXISTS idx_users_org_id ON users(org_id)")
         await db.execute(
             "CREATE INDEX IF NOT EXISTS idx_orgs_created_by ON organizations(created_by_manager_id)"
@@ -133,6 +172,21 @@ async def init_db(db_path: str) -> None:
             CREATE INDEX IF NOT EXISTS idx_ratings_monthly_month
             ON ratings_monthly(month)
             """
+        )
+        await db.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_challenges_biweekly_user_period
+            ON challenges_biweekly(tg_user_id, period_start, period_end)
+            """
+        )
+        await db.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_notifications_user_kind
+            ON notifications(tg_user_id, kind)
+            """
+        )
+        await db.execute(
+            "CREATE INDEX IF NOT EXISTS idx_requisites_history_tg_user_id ON requisites_history(tg_user_id)"
         )
         await db.commit()
 
@@ -261,7 +315,7 @@ async def list_sellers_by_org(
     return await fetch_all(
         db_path,
         """
-        SELECT tg_user_id, registered_at
+        SELECT tg_user_id, registered_at, full_name
         FROM users
         WHERE org_id = ?
         ORDER BY registered_at DESC
@@ -269,6 +323,28 @@ async def list_sellers_by_org(
         """,
         (org_id, limit, offset),
     )
+
+
+async def list_all_seller_ids(db_path: str) -> List[int]:
+    rows = await fetch_all(
+        db_path,
+        "SELECT tg_user_id FROM users WHERE role = 'seller'",
+    )
+    return [int(r["tg_user_id"]) for r in rows]
+
+
+async def list_seller_ids_by_manager(db_path: str, manager_id: int) -> List[int]:
+    rows = await fetch_all(
+        db_path,
+        """
+        SELECT u.tg_user_id
+        FROM users u
+        JOIN organizations o ON o.id = u.org_id
+        WHERE u.role = 'seller' AND o.created_by_manager_id = ?
+        """,
+        (manager_id,),
+    )
+    return [int(r["tg_user_id"]) for r in rows]
 
 
 async def get_user_by_tg_id(db_path: str, tg_user_id: int) -> Optional[aiosqlite.Row]:
@@ -299,6 +375,39 @@ async def update_last_seen(db_path: str, tg_user_id: int) -> None:
         "UPDATE users SET last_seen_at = ? WHERE tg_user_id = ?",
         (now_utc_iso(), tg_user_id),
     )
+
+
+async def add_requisites(db_path: str, tg_user_id: int, content: str) -> None:
+    await execute(
+        db_path,
+        """
+        INSERT INTO requisites_history (tg_user_id, content, created_at)
+        VALUES (?, ?, ?)
+        """,
+        (tg_user_id, content, now_utc_iso()),
+    )
+
+
+async def get_requisites_history(db_path: str, tg_user_id: int) -> List[aiosqlite.Row]:
+    return await fetch_all(
+        db_path,
+        """
+        SELECT id, content, created_at
+        FROM requisites_history
+        WHERE tg_user_id = ?
+        ORDER BY created_at DESC
+        """,
+        (tg_user_id,),
+    )
+
+
+async def has_requisites(db_path: str, tg_user_id: int) -> bool:
+    row = await fetch_one(
+        db_path,
+        "SELECT 1 AS ok FROM requisites_history WHERE tg_user_id = ? LIMIT 1",
+        (tg_user_id,),
+    )
+    return row is not None
 
 
 async def count_unclaimed_turnover(db_path: str, seller_inn: str) -> int:
