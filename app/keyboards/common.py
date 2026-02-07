@@ -16,3 +16,35 @@ def build_inline_keyboard(buttons: list[tuple[str, str]]) -> InlineKeyboardMarku
     return InlineKeyboardMarkup(
         inline_keyboard=[[InlineKeyboardButton(text=text, callback_data=data)] for text, data in buttons]
     )
+
+
+SUPPORT_CALLBACK = "support_request"
+
+
+def support_contact_line(support_username: str | None) -> str:
+    """Строка с кликабельной ссылкой на техподдержку (Telegram автоматически сделает URL кликабельным)."""
+    if support_username:
+        return f"\n\nНаписать в техподдержку: https://t.me/{support_username}"
+    return ""
+
+
+def support_inline_keyboard(
+    support_user_id: int,
+    support_username: str | None = None,
+) -> InlineKeyboardMarkup:
+    """Кнопка для перехода в чат с техподдержкой.
+    Если указан support_username — кнопка с url https://t.me/username (работает в Bot API).
+    Иначе — callback-кнопка: по нажатию бот уведомит техподдержку.
+    """
+    if support_username:
+        url = f"https://t.me/{support_username}"
+        return InlineKeyboardMarkup(
+            inline_keyboard=[
+                [InlineKeyboardButton(text="👉 Написать в техподдержку", url=url)]
+            ]
+        )
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [InlineKeyboardButton(text="👉 Написать в техподдержку", callback_data=SUPPORT_CALLBACK)]
+        ]
+    )

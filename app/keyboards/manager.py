@@ -4,6 +4,8 @@ from app.keyboards.common import BACK_TEXT, build_reply_keyboard
 
 MANAGER_MENU_REGISTER_ORG = "➕ Зарегистрировать организацию"
 MANAGER_MENU_ORGS = "📋 Мои организации"
+MANAGER_MENU_SYNC = "🔄 Обновить базу"
+MANAGER_MENU_EXPORT_RATINGS = "📤 Выгрузить рейтинги в EXCEL"
 MANAGER_MENU_HELP = "ℹ️ Помощь"
 
 ORG_CREATE_CONFIRM = "✅ Создать"
@@ -19,12 +21,26 @@ ORG_ACTION_RESET_PASSWORD = "🔄 Сбросить пароль организа
 
 def manager_main_menu():
     return build_reply_keyboard(
-        [MANAGER_MENU_REGISTER_ORG, MANAGER_MENU_ORGS, MANAGER_MENU_HELP]
+        [
+            MANAGER_MENU_REGISTER_ORG,
+            MANAGER_MENU_ORGS,
+            MANAGER_MENU_SYNC,
+            MANAGER_MENU_EXPORT_RATINGS,
+            MANAGER_MENU_HELP,
+        ]
     )
 
 
 def manager_back_menu():
     return build_reply_keyboard([BACK_TEXT])
+
+
+MANAGER_SYNC_CURRENT_MONTH = "📅 Текущий месяц"
+MANAGER_SYNC_CUSTOM_RANGE = "🗓️ Период ДДММГГГГ по ДДММГГГГ"
+
+
+def manager_sync_menu():
+    return build_reply_keyboard([MANAGER_SYNC_CURRENT_MONTH, MANAGER_SYNC_CUSTOM_RANGE, BACK_TEXT])
 
 
 def org_create_confirm_menu():

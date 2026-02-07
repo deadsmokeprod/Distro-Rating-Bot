@@ -8,6 +8,9 @@ SELLER_RETRY = "🔁 Попробовать снова"
 SELLER_SUPPORT = "🆘 Написать в поддержку"
 
 SELLER_MENU_PROFILE = "👤 Профиль"
+SELLER_MENU_SALES = "✅ Фиксация продажи"
+SELLER_MENU_GLOBAL_RATING = "🌍 Мировой рейтинг месяца"
+SELLER_MENU_COMPANY_RATING = "🏢 Рейтинг в компании за месяц"
 SELLER_MENU_HELP = "ℹ️ Помощь"
 
 
@@ -16,7 +19,15 @@ def seller_start_menu():
 
 
 def seller_main_menu():
-    return build_reply_keyboard([SELLER_MENU_PROFILE, SELLER_MENU_HELP])
+    return build_reply_keyboard(
+        [
+            SELLER_MENU_PROFILE,
+            SELLER_MENU_SALES,
+            SELLER_MENU_GLOBAL_RATING,
+            SELLER_MENU_COMPANY_RATING,
+            SELLER_MENU_HELP,
+        ]
+    )
 
 
 def seller_back_menu():

@@ -2,12 +2,13 @@ from __future__ import annotations
 
 import logging
 
-from aiogram import Router
+from aiogram import F, Router
 from aiogram.filters import Command
 from aiogram.fsm.context import FSMContext
-from aiogram.types import Message
+from aiogram.types import CallbackQuery, Message
 
 from app.config import get_config
+from app.keyboards.common import SUPPORT_CALLBACK
 from app.db import sqlite
 from app.keyboards.manager import manager_main_menu
 from app.keyboards.seller import seller_main_menu, seller_start_menu
@@ -60,3 +61,25 @@ async def handle_start(message: Message, state: FSMContext) -> None:
     except Exception:
         logger.exception("Failed to handle /start")
         await message.answer("Произошла ошибка, попробуйте позже.")
+
+
+@router.callback_query(F.data == SUPPORT_CALLBACK)
+async def support_request_callback(callback: CallbackQuery) -> None:
+    """По нажатию «Написать в техподдержку» (когда SUPPORT_USERNAME не задан) — уведомить поддержку."""
+    if not callback.from_user or not callback.message:
+        return
+    await callback.answer()
+    config = get_config()
+    u = callback.from_user
+    name = (u.first_name or "") + (" " + (u.last_name or "")).strip()
+    username_part = f", @{u.username}" if u.username else ""
+    try:
+        await callback.bot.send_message(
+            config.support_user_id,
+            f"Запрос от пользователя: {name}, ID: <code>{u.id}</code>{username_part}.\n"
+            "Напишите ему в Telegram (поиск по ID или username).",
+        )
+        await callback.message.answer("Запрос отправлен. Техподдержка свяжется с вами.")
+    except Exception:
+        logger.exception("Failed to notify support")
+        await callback.message.answer("Не удалось отправить запрос. Попробуйте позже.")

@@ -1,22 +1,30 @@
 from __future__ import annotations
 
 import logging
+from datetime import date, datetime, timedelta
 from math import ceil
+import re
+from pathlib import Path
 
 from aiogram import F, Router
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.types import CallbackQuery, InlineKeyboardMarkup, Message
+from aiogram.types import FSInputFile
 
 from app.config import get_config
 from app.db import sqlite
 from app.handlers.start import is_manager, show_manager_menu
 from app.handlers.filters import ManagerFilter
-from app.keyboards.common import BACK_TEXT, build_inline_keyboard
+from app.keyboards.common import BACK_TEXT, build_inline_keyboard, support_contact_line, support_inline_keyboard
 from app.keyboards.manager import (
     MANAGER_MENU_HELP,
     MANAGER_MENU_ORGS,
     MANAGER_MENU_REGISTER_ORG,
+    MANAGER_MENU_EXPORT_RATINGS,
+    MANAGER_MENU_SYNC,
+    MANAGER_SYNC_CURRENT_MONTH,
+    MANAGER_SYNC_CUSTOM_RANGE,
     ORG_ACTION_RESET_PASSWORD,
     ORG_ACTION_STAFF,
     ORG_CREATE_BACK_TO_MENU,
@@ -26,11 +34,16 @@ from app.keyboards.manager import (
     ORG_RESET_CONFIRM,
     manager_back_menu,
     manager_main_menu,
+    manager_sync_menu,
     org_create_confirm_menu,
     org_created_menu,
     org_exists_menu,
     org_reset_confirm_menu,
 )
+from app.services.onec_client import OnecClientError
+from app.services.turnover_sync import current_month_range, moscow_today, sync_turnover
+from app.services.ratings import month_str, moscow_today as moscow_today_ratings
+from app.services.ratings_export import build_ratings_excel
 from app.utils.security import generate_password, hash_password
 from app.utils.validators import validate_inn, validate_org_name
 
@@ -47,6 +60,15 @@ class OrgCreateStates(StatesGroup):
     inn = State()
     name = State()
     confirm = State()
+
+
+class ManagerSyncStates(StatesGroup):
+    choose_period = State()
+    custom_range = State()
+
+
+class ManagerExportStates(StatesGroup):
+    period = State()
 
 
 async def _send_error(message: Message) -> None:
@@ -99,6 +121,40 @@ def _org_staff_keyboard(org_id: int, page: int, total_pages: int) -> InlineKeybo
     return build_inline_keyboard(buttons)
 
 
+def _parse_custom_range(text: str) -> tuple[date, date] | None:
+    pattern = r"^\s*(\d{2})(\d{2})(\d{4})\s*по\s*(\d{2})(\d{2})(\d{4})\s*$"
+    match = re.match(pattern, text)
+    if not match:
+        return None
+    day1, month1, year1, day2, month2, year2 = match.groups()
+    try:
+        start = datetime(int(year1), int(month1), int(day1)).date()
+        end = datetime(int(year2), int(month2), int(day2)).date()
+    except ValueError:
+        return None
+    if start > end:
+        return None
+    if (end - start) > timedelta(days=60):
+        return None
+    return start, end
+
+
+def _parse_month_range(text: str) -> tuple[str, str] | None:
+    pattern = r"^\s*с\s*(\d{2})\s*(\d{4})\s*по\s*(\d{2})\s*(\d{4})\s*$"
+    match = re.match(pattern, text)
+    if not match:
+        return None
+    m1, y1, m2, y2 = match.groups()
+    try:
+        start = date(int(y1), int(m1), 1)
+        end = date(int(y2), int(m2), 1)
+    except ValueError:
+        return None
+    if start > end:
+        return None
+    return month_str(start), month_str(end)
+
+
 @router.message(F.text == MANAGER_MENU_REGISTER_ORG)
 async def manager_register_org(message: Message, state: FSMContext) -> None:
     if not is_manager(message.from_user.id):
@@ -106,6 +162,161 @@ async def manager_register_org(message: Message, state: FSMContext) -> None:
     await state.clear()
     await state.set_state(OrgCreateStates.inn)
     await message.answer("Введите ИНН организации (10 или 12 цифр).", reply_markup=manager_back_menu())
+
+
+@router.message(F.text == MANAGER_MENU_EXPORT_RATINGS)
+async def manager_export_ratings_start(message: Message, state: FSMContext) -> None:
+    await state.clear()
+    await state.set_state(ManagerExportStates.period)
+    await message.answer(
+        'Введите период в формате: "с ММ ГГГГ по ММ ГГГГ".\n'
+        "Например: с 01 2026 по 03 2026",
+        reply_markup=manager_back_menu(),
+    )
+
+
+@router.message(ManagerExportStates.period, F.text == BACK_TEXT)
+async def manager_export_ratings_back(message: Message, state: FSMContext) -> None:
+    await state.clear()
+    await show_manager_menu(message)
+
+
+@router.message(ManagerExportStates.period)
+async def manager_export_ratings_run(message: Message, state: FSMContext) -> None:
+    if not message.text:
+        await message.answer("Введите период или нажмите ⬅️ Назад.")
+        return
+    parsed = _parse_month_range(message.text)
+    if not parsed:
+        await message.answer(
+            'Неверный формат. Ожидаю: "с ММ ГГГГ по ММ ГГГГ".',
+            reply_markup=manager_back_menu(),
+        )
+        return
+    start_month, end_month = parsed
+    await state.clear()
+    config = get_config()
+    current_month_label = f"{moscow_today_ratings().month:02d} {moscow_today_ratings().year}"
+    try:
+        path = await build_ratings_excel(
+            config.db_path, start_month, end_month, current_month_label
+        )
+        filename = f"ratings_{start_month}_to_{end_month}.xlsx"
+        await message.answer_document(
+            FSInputFile(path, filename=filename),
+            caption="Выгрузка рейтингов",
+        )
+    except Exception:
+        logger.exception("Failed to export ratings")
+        await message.answer("Не удалось сформировать выгрузку.", reply_markup=manager_main_menu())
+
+
+@router.message(F.text == MANAGER_MENU_SYNC)
+async def manager_sync_start(message: Message, state: FSMContext) -> None:
+    await state.clear()
+    await state.set_state(ManagerSyncStates.choose_period)
+    await message.answer("Выберите период для обновления базы.", reply_markup=manager_sync_menu())
+
+
+@router.message(ManagerSyncStates.choose_period, F.text == BACK_TEXT)
+async def manager_sync_back(message: Message, state: FSMContext) -> None:
+    await state.clear()
+    await show_manager_menu(message)
+
+
+@router.message(ManagerSyncStates.choose_period, F.text == MANAGER_SYNC_CURRENT_MONTH)
+async def manager_sync_current_month(message: Message, state: FSMContext) -> None:
+    config = get_config()
+    await state.clear()
+    start, end = current_month_range(moscow_today())
+    try:
+        fetched, upserted = await sync_turnover(config, start, end)
+        await sqlite.log_audit(
+            config.db_path,
+            actor_tg_user_id=message.from_user.id,
+            actor_role="manager",
+            action="SYNC_TURNOVER",
+            payload={
+                "mode": "current_month",
+                "start": start.isoformat(),
+                "end": end.isoformat(),
+                "fetched": fetched,
+                "upserted": upserted,
+            },
+        )
+        await message.answer(
+            "Обновление завершено.\n"
+            f"Период: {start.isoformat()} — {end.isoformat()}\n"
+            f"Получено строк: {fetched}\n"
+            f"Записано/обновлено: {upserted}",
+            reply_markup=manager_main_menu(),
+        )
+    except OnecClientError as exc:
+        await message.answer(f"Ошибка 1С: {exc}", reply_markup=manager_main_menu())
+    except Exception:
+        logger.exception("Failed to sync turnover (current month)")
+        await message.answer("Ошибка обновления базы.", reply_markup=manager_main_menu())
+
+
+@router.message(ManagerSyncStates.choose_period, F.text == MANAGER_SYNC_CUSTOM_RANGE)
+async def manager_sync_custom_range_start(message: Message, state: FSMContext) -> None:
+    await state.set_state(ManagerSyncStates.custom_range)
+    await message.answer(
+        "Введите период в формате: ДДММГГГГ по ДДММГГГГ.\n"
+        "Например: 01012026 по 31012026",
+        reply_markup=manager_back_menu(),
+    )
+
+
+@router.message(ManagerSyncStates.custom_range, F.text == BACK_TEXT)
+async def manager_sync_custom_back(message: Message, state: FSMContext) -> None:
+    await state.set_state(ManagerSyncStates.choose_period)
+    await message.answer("Выберите период для обновления базы.", reply_markup=manager_sync_menu())
+
+
+@router.message(ManagerSyncStates.custom_range)
+async def manager_sync_custom_range(message: Message, state: FSMContext) -> None:
+    if not message.text:
+        await message.answer("Введите период или нажмите ⬅️ Назад.")
+        return
+    parsed = _parse_custom_range(message.text)
+    if not parsed:
+        await message.answer(
+            "Неверный формат или период больше 60 дней.\n"
+            "Ожидаю: ДДММГГГГ по ДДММГГГГ.",
+            reply_markup=manager_back_menu(),
+        )
+        return
+    start, end = parsed
+    config = get_config()
+    await state.clear()
+    try:
+        fetched, upserted = await sync_turnover(config, start, end)
+        await sqlite.log_audit(
+            config.db_path,
+            actor_tg_user_id=message.from_user.id,
+            actor_role="manager",
+            action="SYNC_TURNOVER",
+            payload={
+                "mode": "custom_range",
+                "start": start.isoformat(),
+                "end": end.isoformat(),
+                "fetched": fetched,
+                "upserted": upserted,
+            },
+        )
+        await message.answer(
+            "Обновление завершено.\n"
+            f"Период: {start.isoformat()} — {end.isoformat()}\n"
+            f"Получено строк: {fetched}\n"
+            f"Записано/обновлено: {upserted}",
+            reply_markup=manager_main_menu(),
+        )
+    except OnecClientError as exc:
+        await message.answer(f"Ошибка 1С: {exc}", reply_markup=manager_main_menu())
+    except Exception:
+        logger.exception("Failed to sync turnover (custom range)")
+        await message.answer("Ошибка обновления базы.", reply_markup=manager_main_menu())
 
 
 @router.message(OrgCreateStates.inn, F.text == BACK_TEXT)
@@ -405,11 +616,11 @@ async def manager_help(message: Message) -> None:
     if not is_manager(message.from_user.id):
         return
     config = get_config()
-    support_link = f"<a href=\"tg://user?id={config.support_user_id}\">техподдержку</a>"
     await message.answer(
         "Бот помогает регистрировать организации и продавцов.\n"
-        f"Если возникли вопросы, напишите в {support_link}.",
-        reply_markup=manager_back_menu(),
+        "Если возникли вопросы — напишите в техподдержку."
+        + support_contact_line(config.support_username),
+        reply_markup=support_inline_keyboard(config.support_user_id, config.support_username),
     )
 
 
