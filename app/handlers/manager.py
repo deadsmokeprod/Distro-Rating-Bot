@@ -343,8 +343,10 @@ async def manager_sync_current_month(message: Message, state: FSMContext) -> Non
     config = get_config()
     await state.clear()
     start, end = current_month_range(moscow_today())
+    operation_type = config.onec_operation_type
     try:
-        fetched, upserted = await sync_turnover(config, start, end)
+        await message.answer("Запрос к 1С отправлен, ожидайте…")
+        fetched, upserted = await sync_turnover(config, start, end, operation_type=operation_type)
         await sqlite.log_audit(
             config.db_path,
             actor_tg_user_id=message.from_user.id,
@@ -352,6 +354,7 @@ async def manager_sync_current_month(message: Message, state: FSMContext) -> Non
             action="SYNC_TURNOVER",
             payload={
                 "mode": "current_month",
+                "operationType": operation_type,
                 "start": start.isoformat(),
                 "end": end.isoformat(),
                 "fetched": fetched,
@@ -359,17 +362,23 @@ async def manager_sync_current_month(message: Message, state: FSMContext) -> Non
             },
         )
         await message.answer(
-            "Обновление завершено.\n"
+            "✅ Обновление завершено.\n"
             f"Период: {start.isoformat()} — {end.isoformat()}\n"
-            f"Получено строк: {fetched}\n"
-            f"Записано/обновлено: {upserted}",
+            f"Получено строк из 1С: {fetched}\n"
+            f"Записано/обновлено в базу: {upserted}",
             reply_markup=manager_main_menu(),
         )
     except OnecClientError as exc:
-        await message.answer(f"Ошибка 1С: {exc}", reply_markup=manager_main_menu())
-    except Exception:
+        await message.answer(
+            f"❌ Ошибка 1С: {exc}",
+            reply_markup=manager_main_menu(),
+        )
+    except Exception as exc:
         logger.exception("Failed to sync turnover (current month)")
-        await message.answer("Ошибка обновления базы.", reply_markup=manager_main_menu())
+        await message.answer(
+            f"❌ Ошибка обновления базы: {exc}",
+            reply_markup=manager_main_menu(),
+        )
 
 
 @router.message(ManagerSyncStates.choose_period, F.text == MANAGER_SYNC_CUSTOM_RANGE)
@@ -403,9 +412,11 @@ async def manager_sync_custom_range(message: Message, state: FSMContext) -> None
         return
     start, end = parsed
     config = get_config()
+    operation_type = config.onec_operation_type
     await state.clear()
     try:
-        fetched, upserted = await sync_turnover(config, start, end)
+        await message.answer("Запрос к 1С отправлен, ожидайте…")
+        fetched, upserted = await sync_turnover(config, start, end, operation_type=operation_type)
         await sqlite.log_audit(
             config.db_path,
             actor_tg_user_id=message.from_user.id,
@@ -413,6 +424,7 @@ async def manager_sync_custom_range(message: Message, state: FSMContext) -> None
             action="SYNC_TURNOVER",
             payload={
                 "mode": "custom_range",
+                "operationType": operation_type,
                 "start": start.isoformat(),
                 "end": end.isoformat(),
                 "fetched": fetched,
@@ -420,17 +432,23 @@ async def manager_sync_custom_range(message: Message, state: FSMContext) -> None
             },
         )
         await message.answer(
-            "Обновление завершено.\n"
+            "✅ Обновление завершено.\n"
             f"Период: {start.isoformat()} — {end.isoformat()}\n"
-            f"Получено строк: {fetched}\n"
-            f"Записано/обновлено: {upserted}",
+            f"Получено строк из 1С: {fetched}\n"
+            f"Записано/обновлено в базу: {upserted}",
             reply_markup=manager_main_menu(),
         )
     except OnecClientError as exc:
-        await message.answer(f"Ошибка 1С: {exc}", reply_markup=manager_main_menu())
-    except Exception:
+        await message.answer(
+            f"❌ Ошибка 1С: {exc}",
+            reply_markup=manager_main_menu(),
+        )
+    except Exception as exc:
         logger.exception("Failed to sync turnover (custom range)")
-        await message.answer("Ошибка обновления базы.", reply_markup=manager_main_menu())
+        await message.answer(
+            f"❌ Ошибка обновления базы: {exc}",
+            reply_markup=manager_main_menu(),
+        )
 
 
 @router.message(OrgCreateStates.inn, F.text == BACK_TEXT)

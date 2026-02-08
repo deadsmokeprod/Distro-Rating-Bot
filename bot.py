@@ -56,8 +56,11 @@ async def main() -> None:
             logging.getLogger(__name__).warning("ONEC_URL is not set. Skipping scheduled sync.")
             return
         start, end = last_30_days_range(moscow_today())
+        operation_type = config.onec_operation_type
         try:
-            fetched, upserted = await sync_turnover(config, start, end)
+            fetched, upserted = await sync_turnover(
+                config, start, end, operation_type=operation_type
+            )
             await sqlite.log_audit(
                 config.db_path,
                 actor_tg_user_id=None,
@@ -65,6 +68,7 @@ async def main() -> None:
                 action="SYNC_TURNOVER_AUTO",
                 payload={
                     "mode": "last_30_days",
+                    "operationType": operation_type,
                     "start": start.isoformat(),
                     "end": end.isoformat(),
                     "fetched": fetched,

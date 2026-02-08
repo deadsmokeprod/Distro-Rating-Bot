@@ -15,6 +15,10 @@ class Config:
     support_user_id: int
     support_username: str | None  # без @, для кнопки https://t.me/username
     onec_url: str | None
+    onec_operation_type: str
+    onec_username: str | None
+    onec_password: str | None
+    onec_timeout_seconds: int
     challenge_growth_pct: int
     challenge_base_volume: float
     quiet_hours_start: str
@@ -38,7 +42,9 @@ def load_config() -> Config:
     if _config is not None:
         return _config
 
-    load_dotenv()
+    # Загружаем .env из каталога проекта (где bot.py), а не из текущей рабочей папки
+    project_root = Path(__file__).resolve().parent.parent
+    load_dotenv(project_root / ".env")
 
     bot_token = os.getenv("BOT_TOKEN", "").strip()
     manager_ids = _parse_manager_ids(os.getenv("MANAGER_IDS", ""))
@@ -47,6 +53,12 @@ def load_config() -> Config:
     support_username = support_username_raw or None
     onec_url_raw = (os.getenv("ONEC_URL", "") or "").strip()
     onec_url = onec_url_raw or None
+    onec_operation_type = (os.getenv("ONEC_OPERATION_TYPE", "Передача между УОТ") or "Передача между УОТ").strip()
+    onec_username_raw = (os.getenv("ONEC_USERNAME", "") or "").strip()
+    onec_username = onec_username_raw or None
+    onec_password_raw = (os.getenv("ONEC_PASSWORD", "") or "").strip()
+    onec_password = onec_password_raw or None
+    onec_timeout_seconds = int(os.getenv("ONEC_TIMEOUT_SECONDS", "60"))
     challenge_growth_pct = int(os.getenv("CHALLENGE_GROWTH_PCT", "20"))
     challenge_base_volume = float(os.getenv("CHALLENGE_BASE_VOLUME", "10"))
     quiet_hours_start = (os.getenv("QUIET_HOURS_START", "19:00") or "19:00").strip()
@@ -70,6 +82,10 @@ def load_config() -> Config:
         support_user_id=support_user_id,
         support_username=support_username,
         onec_url=onec_url,
+        onec_operation_type=onec_operation_type,
+        onec_username=onec_username,
+        onec_password=onec_password,
+        onec_timeout_seconds=onec_timeout_seconds,
         challenge_growth_pct=challenge_growth_pct,
         challenge_base_volume=challenge_base_volume,
         quiet_hours_start=quiet_hours_start,
