@@ -263,8 +263,8 @@ async def main() -> None:
     dp.include_router(manager.router)
     dp.include_router(seller.router)
 
-    await bot.delete_webhook(drop_pending_updates=True)
     try:
+        await bot.delete_webhook(drop_pending_updates=True)
         await dp.start_polling(bot)
     except (asyncio.CancelledError, KeyboardInterrupt):
         logging.getLogger(__name__).info("Bot polling stopped.")
