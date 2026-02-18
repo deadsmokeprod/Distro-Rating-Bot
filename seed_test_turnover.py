@@ -194,8 +194,11 @@ async def main() -> None:
     config = load_config()
     await init_db(config.db_path)
     rows = [_raw_to_row(r) for r in TEST_ROWS_RAW]
-    n = await upsert_chz_turnover(config.db_path, rows)
-    print(f"Записано записей по оборотам: {n}")
+    result = await upsert_chz_turnover(config.db_path, rows)
+    print(
+        "Записано/обновлено по оборотам: "
+        f"{result['upserted_count']} (новых: {result['inserted_count']})"
+    )
 
 
 if __name__ == "__main__":

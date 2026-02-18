@@ -18,7 +18,12 @@ from app.db import sqlite
 from app.db.sqlite import init_db
 from app.handlers import manager, seller, start
 from app.services.onec_client import OnecClientError
-from app.services.turnover_sync import last_30_days_range, moscow_today, sync_turnover
+from app.services.turnover_sync import (
+    last_30_days_range,
+    moscow_today,
+    send_sync_push_if_needed,
+    sync_turnover,
+)
 from app.services.ratings import current_month_rankings, previous_month, write_monthly_snapshot
 from app.services.notifications import can_send_weekly, is_quiet_time, record_notification
 from app.services.challenges import ensure_biweekly_challenges
@@ -58,9 +63,10 @@ async def main() -> None:
         start, end = last_30_days_range(moscow_today())
         operation_type = config.onec_operation_type
         try:
-            fetched, upserted = await sync_turnover(
+            sync_result = await sync_turnover(
                 config, start, end, operation_type=operation_type
             )
+            push_sent = await send_sync_push_if_needed(bot, config, sync_result)
             await sqlite.log_audit(
                 config.db_path,
                 actor_tg_user_id=None,
@@ -71,12 +77,19 @@ async def main() -> None:
                     "operationType": operation_type,
                     "start": start.isoformat(),
                     "end": end.isoformat(),
-                    "fetched": fetched,
-                    "upserted": upserted,
+                    "fetched": sync_result.fetched_count,
+                    "upserted": sync_result.upserted_count,
+                    "inserted_count": sync_result.inserted_count,
+                    "affected_company_group_ids": sync_result.affected_company_group_ids,
+                    "sync_push_sent": push_sent,
                 },
             )
             logging.getLogger(__name__).info(
-                "Scheduled sync done. fetched=%s upserted=%s", fetched, upserted
+                "Scheduled sync done. fetched=%s upserted=%s inserted=%s push_sent=%s",
+                sync_result.fetched_count,
+                sync_result.upserted_count,
+                sync_result.inserted_count,
+                push_sent,
             )
         except OnecClientError as exc:
             logging.getLogger(__name__).error("Scheduled sync failed: %s", exc)
@@ -99,7 +112,11 @@ async def main() -> None:
         try:
             rows = await sqlite.fetch_all(
                 config.db_path,
-                "SELECT tg_user_id, org_id, last_seen_at FROM users WHERE role = 'seller'",
+                """
+                SELECT tg_user_id, company_group_id, last_seen_at
+                FROM users
+                WHERE role = 'seller' AND status = 'active'
+                """,
             )
             rankings = await current_month_rankings(config.db_path)
             ranking_map = {r.tg_user_id: r for r in rankings}
@@ -184,10 +201,14 @@ async def main() -> None:
                 if last_seen:
                     last_seen_dt = datetime.fromisoformat(last_seen)
                     if (now - last_seen_dt).days >= 3:
-                        org = await sqlite.get_org_by_id(config.db_path, int(row["org_id"]))
-                        if org:
-                            unclaimed = await sqlite.count_unclaimed_turnover(
-                                config.db_path, str(org["inn"])
+                        inns = await sqlite.list_org_inns_by_group(
+                            config.db_path, int(row["company_group_id"])
+                        )
+                        if inns:
+                            unclaimed = await sqlite.count_unclaimed_turnover_by_inns(
+                                config.db_path,
+                                inns,
+                                launch_date_iso=config.bot_launch_date.isoformat(),
                             )
                             text = (
                                 f"У вас есть {unclaimed} незакреплённых продаж. "
@@ -248,7 +269,7 @@ async def main() -> None:
     except (asyncio.CancelledError, KeyboardInterrupt):
         logging.getLogger(__name__).info("Bot polling stopped.")
     finally:
-        scheduler.shutdown(wait=False)
+        scheduler.shutdown(wait=True)
         await bot.session.close()
 
 

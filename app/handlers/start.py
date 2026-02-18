@@ -10,6 +10,7 @@ from aiogram.types import CallbackQuery, Message
 from app.config import get_config
 from app.keyboards.common import SUPPORT_CALLBACK
 from app.db import sqlite
+from app.handlers.filters import PrivateChatFilter
 from app.keyboards.manager import manager_main_menu
 from app.keyboards.seller import seller_main_menu, seller_start_menu
 from app.services.challenges import ensure_biweekly_challenges, get_current_challenge, update_challenge_progress
@@ -19,6 +20,13 @@ from app.services.ratings import current_month_rankings
 logger = logging.getLogger(__name__)
 
 router = Router()
+router.message.filter(PrivateChatFilter())
+router.callback_query.filter(PrivateChatFilter())
+
+
+def is_admin(user_id: int) -> bool:
+    config = get_config()
+    return user_id in config.admin_ids
 
 
 def is_manager(user_id: int) -> bool:
@@ -26,8 +34,13 @@ def is_manager(user_id: int) -> bool:
     return user_id in config.manager_ids
 
 
+def is_manager_or_admin(user_id: int) -> bool:
+    return is_manager(user_id) or is_admin(user_id)
+
+
 async def show_manager_menu(message: Message) -> None:
-    await message.answer("Вы вошли как Менеджер.", reply_markup=manager_main_menu())
+    role_name = "Администратор" if is_admin(message.from_user.id) else "Менеджер"
+    await message.answer(f"Вы вошли как {role_name}.", reply_markup=manager_main_menu())
 
 
 async def show_seller_menu(message: Message, tg_user_id: int | None = None) -> None:
@@ -37,7 +50,11 @@ async def show_seller_menu(message: Message, tg_user_id: int | None = None) -> N
     await ensure_biweekly_challenges(config)
     challenge, _ = await update_challenge_progress(config, user_id)
     rows = await current_month_rankings(config.db_path)
-    league = compute_league(rows, user_id)
+    user = await sqlite.get_user_by_tg_id(config.db_path, user_id)
+    if user:
+        org_id = int(user["org_id"])
+        rows = [r for r in rows if r.org_id == org_id]
+    league = compute_league(rows, user_id, rank_attr="company_rank")
     challenge_line = ""
     if challenge:
         challenge_line = (
@@ -55,7 +72,7 @@ async def show_seller_menu(message: Message, tg_user_id: int | None = None) -> N
 async def show_seller_start(message: Message) -> None:
     await message.answer(
         "Вы ещё не зарегистрированы.\n"
-        "Ваша компания зарегистрирована?",
+        "Выберите действие:",
         reply_markup=seller_start_menu(),
     )
 
@@ -66,12 +83,22 @@ async def handle_start(message: Message, state: FSMContext) -> None:
     config = get_config()
     user_id = message.from_user.id
     try:
-        if is_manager(user_id):
+        if is_manager_or_admin(user_id):
             await show_manager_menu(message)
             return
 
         user = await sqlite.get_user_by_tg_id(config.db_path, user_id)
         if user:
+            if str(user["status"]) == "fired":
+                org = await sqlite.get_org_by_id(config.db_path, int(user["org_id"]))
+                inn = org["inn"] if org else "-"
+                name = org["name"] if org else "Неизвестная организация"
+                await message.answer(
+                    f"Вы уволены из компании {inn} {name}.\n"
+                    "Для продолжения нажмите «📝 Регистрация в компании».",
+                    reply_markup=seller_start_menu(),
+                )
+                return
             await sqlite.update_last_seen(config.db_path, user_id)
             await show_seller_menu(message, user_id)
             return

@@ -7,6 +7,10 @@ MANAGER_MENU_ORGS = "📋 Мои организации"
 MANAGER_MENU_SYNC = "🔄 Обновить базу"
 MANAGER_MENU_EXPORT_RATINGS = "📤 Выгрузить рейтинги в EXCEL"
 MANAGER_MENU_BROADCAST = "📣 Рассылка продавцам"
+MANAGER_MENU_CHANGE_INN = "🔁 Смена ИНН"
+MANAGER_MENU_MERGE_ORGS = "🔗 Слияние компаний"
+MANAGER_MENU_GOALS_ADMIN = "🎯 Личные цели (админ)"
+MANAGER_MENU_RULES = "📎 Правила и рекомендации"
 MANAGER_MENU_HELP = "ℹ️ Помощь"
 
 ORG_CREATE_CONFIRM = "✅ Создать"
@@ -17,7 +21,9 @@ ORG_CREATE_BACK_TO_MENU = "⬅️ В главное меню"
 ORG_RESET_CONFIRM = "✅ Сбросить"
 
 ORG_ACTION_STAFF = "👥 Сотрудники"
-ORG_ACTION_RESET_PASSWORD = "🔄 Сбросить пароль организации"
+ORG_ACTION_RESET_SELLER_PASSWORD = "🔄 Сбросить пароль SELLER"
+ORG_ACTION_RESET_ROP_PASSWORD = "🔄 Сбросить пароль ROP"
+MANAGER_MENU_FIRE_ROP = "🧯 Уволить РОП"
 
 
 def manager_main_menu():
@@ -28,6 +34,11 @@ def manager_main_menu():
             MANAGER_MENU_SYNC,
             MANAGER_MENU_EXPORT_RATINGS,
             MANAGER_MENU_BROADCAST,
+            MANAGER_MENU_CHANGE_INN,
+            MANAGER_MENU_MERGE_ORGS,
+            MANAGER_MENU_GOALS_ADMIN,
+            MANAGER_MENU_RULES,
+            MANAGER_MENU_FIRE_ROP,
             MANAGER_MENU_HELP,
         ]
     )
@@ -72,3 +83,39 @@ def org_exists_menu():
 
 def org_reset_confirm_menu():
     return build_reply_keyboard([ORG_RESET_CONFIRM, BACK_TEXT])
+
+
+GOALS_MENU_SUPERTASKS = "📌 Сверхзадачи"
+GOALS_MENU_AVG_LEVELS = "📈 Уровни среднемесячного"
+GOALS_MENU_DOWNLOAD_TEMPLATE = "📥 Скачать шаблон Excel"
+GOALS_MENU_UPLOAD_TEMPLATE = "📤 Загрузить Excel"
+GOALS_MENU_AVG_CREATE = "➕ Назначить уровень"
+
+
+def manager_goals_menu():
+    return build_reply_keyboard(
+        [
+            GOALS_MENU_SUPERTASKS,
+            GOALS_MENU_AVG_LEVELS,
+            BACK_TEXT,
+        ]
+    )
+
+
+def manager_supertasks_menu():
+    return build_reply_keyboard(
+        [
+            GOALS_MENU_DOWNLOAD_TEMPLATE,
+            GOALS_MENU_UPLOAD_TEMPLATE,
+            BACK_TEXT,
+        ]
+    )
+
+
+def manager_avg_levels_menu():
+    return build_reply_keyboard(
+        [
+            GOALS_MENU_AVG_CREATE,
+            BACK_TEXT,
+        ]
+    )

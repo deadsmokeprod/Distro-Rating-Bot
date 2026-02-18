@@ -46,7 +46,7 @@ async def _last_month_volume(db_path: str, tg_user_id: int) -> float:
         FROM sales_claims c
         JOIN chz_turnover t ON t.id = c.turnover_id
         WHERE c.claimed_by_tg_user_id = ?
-          AND substr(c.claimed_at, 1, 10) BETWEEN ? AND ?
+          AND substr(t.period, 1, 10) BETWEEN ? AND ?
         """,
         (tg_user_id, start.isoformat(), end.isoformat()),
     )
@@ -69,7 +69,7 @@ async def ensure_biweekly_challenges(cfg: Config) -> None:
     period_end = end.isoformat()
     users = await sqlite.fetch_all(
         cfg.db_path,
-        "SELECT tg_user_id FROM users WHERE role = 'seller'",
+        "SELECT tg_user_id FROM users WHERE role IN ('seller','rop') AND status = 'active'",
     )
     for row in users:
         tg_user_id = int(row["tg_user_id"])
@@ -121,7 +121,7 @@ async def update_challenge_progress(cfg: Config, tg_user_id: int) -> tuple[Chall
         FROM sales_claims c
         JOIN chz_turnover t ON t.id = c.turnover_id
         WHERE c.claimed_by_tg_user_id = ?
-          AND substr(c.claimed_at, 1, 10) BETWEEN ? AND ?
+          AND substr(t.period, 1, 10) BETWEEN ? AND ?
         """,
         (tg_user_id, start.isoformat(), end.isoformat()),
     )

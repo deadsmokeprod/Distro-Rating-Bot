@@ -83,12 +83,13 @@ async def _totals_for_period(db_path: str, start: date | None, end: date | None)
                 u.org_id AS org_id,
                 COALESCE(u.full_name, '') AS full_name,
                 COALESCE(SUM(CASE
-                    WHEN substr(c.claimed_at, 1, 10) BETWEEN ? AND ? THEN t.volume_goods
+                    WHEN substr(t.period, 1, 10) BETWEEN ? AND ? THEN t.volume_goods
+                    ELSE 0
                 END), 0) AS total_volume
             FROM users u
             LEFT JOIN sales_claims c ON c.claimed_by_tg_user_id = u.tg_user_id
             LEFT JOIN chz_turnover t ON t.id = c.turnover_id
-            WHERE u.role = 'seller'
+            WHERE u.role IN ('seller', 'rop') AND u.status = 'active'
             GROUP BY u.tg_user_id, u.org_id, u.full_name
         """
         rows = await sqlite.fetch_all(db_path, query, (start.isoformat(), end.isoformat()))
@@ -102,7 +103,7 @@ async def _totals_for_period(db_path: str, start: date | None, end: date | None)
             FROM users u
             LEFT JOIN sales_claims c ON c.claimed_by_tg_user_id = u.tg_user_id
             LEFT JOIN chz_turnover t ON t.id = c.turnover_id
-            WHERE u.role = 'seller'
+            WHERE u.role IN ('seller', 'rop') AND u.status = 'active'
             GROUP BY u.tg_user_id, u.org_id, u.full_name
         """
         rows = await sqlite.fetch_all(db_path, query)
