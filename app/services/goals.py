@@ -24,6 +24,10 @@ def _fmt(value: float) -> str:
     return f"{value:.2f}".rstrip("0").rstrip(".")
 
 
+def _format_user_date(value: str) -> str:
+    return datetime.fromisoformat(value[:10]).strftime("%d.%m.%Y")
+
+
 async def _ensure_pool_state(cfg: Config, company_group_id: int) -> tuple[str, str]:
     current = await sqlite.get_pool_state_for_group(cfg.db_path, company_group_id)
     if current:
@@ -268,7 +272,10 @@ async def render_personal_goals_text(cfg: Config, user: dict[str, Any]) -> str:
     tg_user_id = int(user["tg_user_id"])
     company_group_id = int(user["company_group_id"])
     pool_start, pool_end = await _ensure_pool_state(cfg, company_group_id)
-    pool_line = f"Бассейн: {pool_start[:10]} — {pool_end[:10]} ({cfg.pool_medcoin_per_liter:g} 🍯/л)"
+    pool_line = (
+        f"Бассейн: {_format_user_date(pool_start)} — {_format_user_date(pool_end)} "
+        f"({cfg.pool_medcoin_per_liter:g} 🍯/л)"
+    )
     avg_target = await compute_avg_target(cfg, tg_user_id)
     supertasks = [dict(r) for r in await sqlite.list_active_supertasks_for_user(cfg.db_path, tg_user_id, company_group_id)]
     supertask_lines = []

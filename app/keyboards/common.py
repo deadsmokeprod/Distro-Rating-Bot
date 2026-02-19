@@ -19,6 +19,7 @@ def build_inline_keyboard(buttons: list[tuple[str, str]]) -> InlineKeyboardMarku
 
 
 SUPPORT_CALLBACK = "support_request"
+MANAGER_HELP_CALLBACK = "manager_help_request"
 
 
 def support_contact_line(support_username: str | None) -> str:
@@ -35,11 +36,36 @@ def support_inline_keyboard(
         url = f"https://t.me/{support_username}"
         return InlineKeyboardMarkup(
             inline_keyboard=[
-                [InlineKeyboardButton(text="👉 Написать в техподдержку", url=url)]
+                [InlineKeyboardButton(text="📝 Оставить обращение", callback_data=SUPPORT_CALLBACK)],
+                [InlineKeyboardButton(text="👉 Написать в Telegram", url=url)],
             ]
         )
     return InlineKeyboardMarkup(
         inline_keyboard=[
-            [InlineKeyboardButton(text="👉 Написать в техподдержку", callback_data=SUPPORT_CALLBACK)]
+            [InlineKeyboardButton(text="📝 Оставить обращение", callback_data=SUPPORT_CALLBACK)]
+        ]
+    )
+
+
+def support_confirm_keyboard(token: str, can_send: bool = True) -> InlineKeyboardMarkup:
+    send_button = ("✅ Отправить", f"support_send:{token}")
+    return build_inline_keyboard(
+        [
+            send_button,
+            ("❌ Отмена", f"support_cancel:{token}"),
+        ]
+    )
+
+
+def manager_help_inline_keyboard() -> InlineKeyboardMarkup:
+    return build_inline_keyboard([("🤝 Менеджер Медоварни", MANAGER_HELP_CALLBACK)])
+
+
+def manager_help_confirm_keyboard(token: str, can_send: bool = True) -> InlineKeyboardMarkup:
+    send_button = ("✅ Отправить", f"mhelp_send:{token}")
+    return build_inline_keyboard(
+        [
+            send_button,
+            ("❌ Отмена", f"mhelp_cancel:{token}"),
         ]
     )

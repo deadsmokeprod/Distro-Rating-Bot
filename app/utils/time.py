@@ -12,4 +12,4 @@ def format_iso_human(iso_value: str) -> str:
         dt = datetime.fromisoformat(iso_value)
     except ValueError:
         return iso_value
-    return dt.strftime("%Y-%m-%d %H:%M:%S")
+    return dt.strftime("%d.%m.%Y")

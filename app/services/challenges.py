@@ -25,14 +25,13 @@ def moscow_today() -> date:
     return datetime.now(ZoneInfo("Europe/Moscow")).date()
 
 
+def monthly_period_for(target: date) -> tuple[date, date]:
+    return month_bounds(target)
+
+
 def biweekly_period_for(target: date) -> tuple[date, date]:
-    if target.day <= 14:
-        start = target.replace(day=1)
-        end = target.replace(day=14)
-    else:
-        start = target.replace(day=15)
-        end = month_bounds(target)[1]
-    return start, end
+    # Backward-compatible alias: challenges now run by month.
+    return monthly_period_for(target)
 
 
 async def _last_month_volume(db_path: str, tg_user_id: int) -> float:
@@ -64,7 +63,7 @@ def _calc_target(last_month_volume: float, cfg: Config) -> float:
 
 async def ensure_biweekly_challenges(cfg: Config) -> None:
     today = moscow_today()
-    start, end = biweekly_period_for(today)
+    start, end = monthly_period_for(today)
     period_start = start.isoformat()
     period_end = end.isoformat()
     users = await sqlite.fetch_all(
@@ -98,7 +97,7 @@ async def ensure_biweekly_challenges(cfg: Config) -> None:
 
 async def get_current_challenge(cfg: Config, tg_user_id: int) -> Challenge | None:
     today = moscow_today()
-    start, end = biweekly_period_for(today)
+    start, end = monthly_period_for(today)
     row = await sqlite.fetch_one(
         cfg.db_path,
         """
@@ -113,7 +112,7 @@ async def get_current_challenge(cfg: Config, tg_user_id: int) -> Challenge | Non
 
 async def update_challenge_progress(cfg: Config, tg_user_id: int) -> tuple[Challenge | None, bool]:
     today = moscow_today()
-    start, end = biweekly_period_for(today)
+    start, end = monthly_period_for(today)
     row = await sqlite.fetch_one(
         cfg.db_path,
         """

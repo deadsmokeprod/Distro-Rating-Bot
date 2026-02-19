@@ -18,7 +18,7 @@ from openpyxl import Workbook, load_workbook
 from app.config import get_config
 from app.db import sqlite
 from app.handlers.start import is_admin, is_manager_or_admin, show_manager_menu
-from app.handlers.filters import ManagerFilter, PrivateChatFilter
+from app.handlers.filters import ActiveInlineMenuFilter, ManagerFilter, PrivateChatFilter
 from app.keyboards.common import BACK_TEXT, build_inline_keyboard, support_contact_line, support_inline_keyboard
 from app.keyboards.manager import (
     MANAGER_MENU_HELP,
@@ -35,6 +35,7 @@ from app.keyboards.manager import (
     MANAGER_SYNC_CURRENT_MONTH,
     MANAGER_SYNC_CUSTOM_RANGE,
     MANAGER_BROADCAST_ALL,
+    MANAGER_BROADCAST_BY_ORG,
     MANAGER_BROADCAST_MY_ORGS,
     MANAGER_BROADCAST_CONFIRM,
     ORG_ACTION_RESET_ROP_PASSWORD,
@@ -84,6 +85,8 @@ from app.services.goals import sync_avg_levels_for_user
 from app.utils.time import format_iso_human
 from app.utils.security import generate_password, hash_password
 from app.utils.validators import validate_inn, validate_org_name
+from app.utils.inline_menu import clear_active_inline_menu, mark_inline_menu_active, send_single_inline_menu
+from app.utils.rate_limit import is_rate_limited
 
 logger = logging.getLogger(__name__)
 
@@ -92,6 +95,7 @@ router.message.filter(ManagerFilter())
 router.callback_query.filter(ManagerFilter())
 router.message.filter(PrivateChatFilter())
 router.callback_query.filter(PrivateChatFilter())
+router.callback_query.filter(ActiveInlineMenuFilter())
 
 PAGE_SIZE = 10
 
@@ -100,6 +104,24 @@ def _can_access_org(actor_tg_user_id: int, org: object) -> bool:
     if is_admin(actor_tg_user_id):
         return True
     return int(org["created_by_manager_id"]) == actor_tg_user_id
+
+
+def _manager_main_menu_for(actor_tg_user_id: int):
+    return manager_main_menu(is_admin_view=is_admin(actor_tg_user_id))
+
+
+def _person_label(full_name: str | None, tg_user_id: int) -> str:
+    name = (full_name or "").strip()
+    return f"{name} ({tg_user_id})" if name else f"ID {tg_user_id}"
+
+
+def _row_full_name(row: dict | sqlite3.Row | None) -> str | None:
+    if row is None:
+        return None
+    try:
+        return row["full_name"]
+    except Exception:
+        return None
 
 
 class OrgCreateStates(StatesGroup):
@@ -119,6 +141,7 @@ class ManagerExportStates(StatesGroup):
 
 class ManagerBroadcastStates(StatesGroup):
     target = State()
+    choose_org = State()
     message = State()
     confirm = State()
 
@@ -237,37 +260,103 @@ def _inn_change_org_list_keyboard(
     return build_inline_keyboard(buttons)
 
 
-async def _send_inn_change_org_list(message: Message, page: int, edit: bool = False) -> None:
+async def _send_inn_change_org_list(
+    message: Message, actor_tg_user_id: int, page: int, edit: bool = False
+) -> None:
     config = get_config()
-    if is_admin(message.from_user.id):
+    if is_admin(actor_tg_user_id):
         total = await sqlite.count_orgs(config.db_path)
         orgs = await sqlite.list_orgs(config.db_path, PAGE_SIZE, max(0, page) * PAGE_SIZE)
     else:
-        total = await sqlite.count_orgs_by_manager(config.db_path, message.from_user.id)
+        total = await sqlite.count_orgs_by_manager(config.db_path, actor_tg_user_id)
         orgs = await sqlite.list_orgs_by_manager(
-            config.db_path, message.from_user.id, PAGE_SIZE, max(0, page) * PAGE_SIZE
+            config.db_path, actor_tg_user_id, PAGE_SIZE, max(0, page) * PAGE_SIZE
         )
     if total <= 0:
         text = "Нет доступных организаций для смены ИНН."
         if edit:
             await message.edit_text(text, reply_markup=build_inline_keyboard([("⬅️ В меню", "org_back_menu")]))
+            await mark_inline_menu_active(message, actor_tg_user_id)
         else:
-            await message.answer(text, reply_markup=manager_main_menu())
+            await message.answer(text, reply_markup=_manager_main_menu_for(actor_tg_user_id))
         return
     total_pages = max(1, ceil(total / PAGE_SIZE))
     page = max(0, min(page, total_pages - 1))
-    if is_admin(message.from_user.id):
+    if is_admin(actor_tg_user_id):
         orgs = await sqlite.list_orgs(config.db_path, PAGE_SIZE, page * PAGE_SIZE)
     else:
         orgs = await sqlite.list_orgs_by_manager(
-            config.db_path, message.from_user.id, PAGE_SIZE, page * PAGE_SIZE
+            config.db_path, actor_tg_user_id, PAGE_SIZE, page * PAGE_SIZE
         )
     keyboard = _inn_change_org_list_keyboard([dict(o) for o in orgs], page, total_pages)
     text = "Выберите компанию для смены ИНН:"
     if edit:
         await message.edit_text(text, reply_markup=keyboard)
+        await mark_inline_menu_active(message, actor_tg_user_id)
     else:
-        await message.answer(text, reply_markup=keyboard)
+        await send_single_inline_menu(
+            message,
+            actor_tg_user_id=actor_tg_user_id,
+            text=text,
+            reply_markup=keyboard,
+        )
+
+
+def _broadcast_org_list_keyboard(
+    orgs: list[dict], page: int, total_pages: int
+) -> InlineKeyboardMarkup:
+    buttons: list[tuple[str, str]] = []
+    for org in orgs:
+        buttons.append((f"{org['name']} — {org['inn']}", f"br_org_pick:{org['id']}:{page}"))
+    if page > 0:
+        buttons.append(("◀️", f"br_org_page:{page - 1}"))
+    if page < total_pages - 1:
+        buttons.append(("▶️", f"br_org_page:{page + 1}"))
+    buttons.append(("⬅️ Назад", "br_org_back"))
+    return build_inline_keyboard(buttons)
+
+
+async def _send_broadcast_org_list(
+    message: Message, actor_tg_user_id: int, page: int, edit: bool = False
+) -> None:
+    config = get_config()
+    if is_admin(actor_tg_user_id):
+        total = await sqlite.count_orgs(config.db_path)
+    else:
+        total = await sqlite.count_orgs_by_manager(config.db_path, actor_tg_user_id)
+    if total <= 0:
+        text = "Нет доступных компаний для адресной рассылки."
+        if edit:
+            await message.edit_text(
+                text,
+                reply_markup=build_inline_keyboard([("⬅️ В меню", "org_back_menu")]),
+            )
+            await mark_inline_menu_active(message, actor_tg_user_id)
+        else:
+            await message.answer(text, reply_markup=_manager_main_menu_for(actor_tg_user_id))
+        return
+    total_pages = max(1, ceil(total / PAGE_SIZE))
+    page = max(0, min(page, total_pages - 1))
+    if is_admin(actor_tg_user_id):
+        orgs = await sqlite.list_orgs(config.db_path, PAGE_SIZE, page * PAGE_SIZE)
+    else:
+        orgs = await sqlite.list_orgs_by_manager(
+            config.db_path, actor_tg_user_id, PAGE_SIZE, page * PAGE_SIZE
+        )
+    org_rows = [dict(o) for o in orgs]
+    if edit:
+        await message.edit_text(
+            "Выберите компанию для рассылки:",
+            reply_markup=_broadcast_org_list_keyboard(org_rows, page, total_pages),
+        )
+        await mark_inline_menu_active(message, actor_tg_user_id)
+    else:
+        await send_single_inline_menu(
+            message,
+            actor_tg_user_id=actor_tg_user_id,
+            text="Выберите компанию для рассылки:",
+            reply_markup=_broadcast_org_list_keyboard(org_rows, page, total_pages),
+        )
 
 
 def _merge_master_list_keyboard(orgs: list[dict], page: int, total_pages: int) -> InlineKeyboardMarkup:
@@ -318,7 +407,9 @@ def _merge_confirm_step2_keyboard() -> InlineKeyboardMarkup:
     )
 
 
-async def _send_merge_master_list(message: Message, page: int, edit: bool = False) -> None:
+async def _send_merge_master_list(
+    message: Message, actor_tg_user_id: int, page: int, edit: bool = False
+) -> None:
     config = get_config()
     total = await sqlite.count_orgs(config.db_path)
     if total <= 1:
@@ -326,8 +417,14 @@ async def _send_merge_master_list(message: Message, page: int, edit: bool = Fals
         kb = build_inline_keyboard([("⬅️ В меню", "org_back_menu")])
         if edit:
             await message.edit_text(text, reply_markup=kb)
+            await mark_inline_menu_active(message, actor_tg_user_id)
         else:
-            await message.answer(text, reply_markup=kb)
+            await send_single_inline_menu(
+                message,
+                actor_tg_user_id=actor_tg_user_id,
+                text=text,
+                reply_markup=kb,
+            )
         return
     total_pages = max(1, ceil(total / PAGE_SIZE))
     page = max(0, min(page, total_pages - 1))
@@ -336,12 +433,23 @@ async def _send_merge_master_list(message: Message, page: int, edit: bool = Fals
     text = "Выберите мастер-компанию (куда вливаем):"
     if edit:
         await message.edit_text(text, reply_markup=kb)
+        await mark_inline_menu_active(message, actor_tg_user_id)
     else:
-        await message.answer(text, reply_markup=kb)
+        await send_single_inline_menu(
+            message,
+            actor_tg_user_id=actor_tg_user_id,
+            text=text,
+            reply_markup=kb,
+        )
 
 
 async def _send_merge_joined_list(
-    message: Message, master_org_id: int, selected_ids: set[int], page: int, edit: bool = True
+    message: Message,
+    actor_tg_user_id: int,
+    master_org_id: int,
+    selected_ids: set[int],
+    page: int,
+    edit: bool = True,
 ) -> None:
     config = get_config()
     all_orgs = [dict(r) for r in await sqlite.list_orgs(config.db_path, 1000, 0)]
@@ -352,8 +460,14 @@ async def _send_merge_joined_list(
         kb = build_inline_keyboard([("⬅️ В меню", "org_back_menu")])
         if edit:
             await message.edit_text(text, reply_markup=kb)
+            await mark_inline_menu_active(message, actor_tg_user_id)
         else:
-            await message.answer(text, reply_markup=kb)
+            await send_single_inline_menu(
+                message,
+                actor_tg_user_id=actor_tg_user_id,
+                text=text,
+                reply_markup=kb,
+            )
         return
     total_pages = max(1, ceil(total / PAGE_SIZE))
     page = max(0, min(page, total_pages - 1))
@@ -369,19 +483,14 @@ async def _send_merge_joined_list(
     )
     if edit:
         await message.edit_text(text, reply_markup=kb)
+        await mark_inline_menu_active(message, actor_tg_user_id)
     else:
-        await message.answer(text, reply_markup=kb)
-
-
-async def _enable_merge_confirm(target_message: Message, delay_sec: int) -> None:
-    await asyncio.sleep(max(1, delay_sec))
-    try:
-        await target_message.edit_text(
-            "Таймер истек. Выполнить слияние сейчас?",
-            reply_markup=_merge_confirm_step2_keyboard(),
+        await send_single_inline_menu(
+            message,
+            actor_tg_user_id=actor_tg_user_id,
+            text=text,
+            reply_markup=kb,
         )
-    except Exception:
-        logger.exception("Failed to update merge confirm timer")
 
 
 def _parse_custom_range(text: str) -> tuple[date, date] | None:
@@ -400,6 +509,13 @@ def _parse_custom_range(text: str) -> tuple[date, date] | None:
     if (end - start) > timedelta(days=60):
         return None
     return start, end
+
+
+def _render_onec_error(exc: OnecClientError) -> str:
+    text = f"❌ Ошибка 1С: {exc}"
+    if getattr(exc, "hint", None):
+        text += f"\nПодсказка: {exc.hint}"
+    return text
 
 
 def _parse_month_range(text: str) -> tuple[str, str] | None:
@@ -447,6 +563,69 @@ def _parse_avg_level_payload(text: str) -> tuple[int, float, float, int] | None:
     return tg_user_id, target_liters, reward, days
 
 
+def _broadcast_content_preview(content_type: str, text: str) -> str:
+    if content_type == "text":
+        preview = text.strip()
+        if len(preview) > 120:
+            preview = preview[:117] + "..."
+        return f"Текст: {preview}" if preview else "Текстовое сообщение"
+    labels = {
+        "photo": "Фото",
+        "video": "Видео",
+        "voice": "Голосовое сообщение",
+        "video_note": "Видео-кружок",
+        "document": "Файл",
+        "animation": "GIF/анимация",
+        "sticker": "Стикер",
+        "audio": "Аудио",
+        "contact": "Контакт",
+        "location": "Геолокация",
+        "venue": "Точка/локация",
+    }
+    return labels.get(content_type, f"Контент ({content_type})")
+
+
+def _is_service_message_type(content_type: str) -> bool:
+    # Telegram service/system updates are not suitable for broadcast copy.
+    service_types = {
+        "new_chat_members",
+        "left_chat_member",
+        "new_chat_title",
+        "new_chat_photo",
+        "delete_chat_photo",
+        "group_chat_created",
+        "supergroup_chat_created",
+        "channel_chat_created",
+        "message_auto_delete_timer_changed",
+        "migrate_to_chat_id",
+        "migrate_from_chat_id",
+        "pinned_message",
+        "forum_topic_created",
+        "forum_topic_edited",
+        "forum_topic_closed",
+        "forum_topic_reopened",
+        "general_forum_topic_hidden",
+        "general_forum_topic_unhidden",
+        "video_chat_scheduled",
+        "video_chat_started",
+        "video_chat_ended",
+        "video_chat_participants_invited",
+        "write_access_allowed",
+        "users_shared",
+        "chat_shared",
+        "connected_website",
+        "passport_data",
+        "proximity_alert_triggered",
+        "web_app_data",
+        "giveaway_created",
+        "giveaway",
+        "giveaway_winners",
+        "giveaway_completed",
+        "boost_added",
+    }
+    return content_type in service_types
+
+
 @router.message(F.text == MANAGER_MENU_REGISTER_ORG)
 async def manager_register_org(message: Message, state: FSMContext) -> None:
     if not is_manager_or_admin(message.from_user.id):
@@ -462,7 +641,7 @@ async def manager_broadcast_start(message: Message, state: FSMContext) -> None:
     await state.set_state(ManagerBroadcastStates.target)
     await message.answer(
         "Кому отправить сообщение?",
-        reply_markup=manager_broadcast_target_menu(),
+        reply_markup=manager_broadcast_target_menu(is_admin_view=is_admin(message.from_user.id)),
     )
 
 
@@ -472,7 +651,7 @@ async def manager_change_inn_start(message: Message, state: FSMContext) -> None:
         return
     await state.clear()
     await state.set_state(ManagerInnChangeStates.choose_org)
-    await _send_inn_change_org_list(message, page=0, edit=False)
+    await _send_inn_change_org_list(message, actor_tg_user_id=message.from_user.id, page=0, edit=False)
 
 
 @router.callback_query(F.data.startswith("innchg_org_page:"))
@@ -482,7 +661,12 @@ async def manager_change_inn_org_page(callback: CallbackQuery, state: FSMContext
         return
     _, page_s = callback.data.split(":")
     await state.set_state(ManagerInnChangeStates.choose_org)
-    await _send_inn_change_org_list(callback.message, page=int(page_s), edit=True)
+    await _send_inn_change_org_list(
+        callback.message,
+        actor_tg_user_id=callback.from_user.id,
+        page=int(page_s),
+        edit=True,
+    )
 
 
 @router.callback_query(F.data.startswith("innchg_org_pick:"))
@@ -514,7 +698,7 @@ async def manager_change_inn_org_pick(callback: CallbackQuery, state: FSMContext
 @router.message(ManagerInnChangeStates.old_inn, F.text == BACK_TEXT)
 async def manager_change_inn_old_back(message: Message, state: FSMContext) -> None:
     await state.set_state(ManagerInnChangeStates.choose_org)
-    await _send_inn_change_org_list(message, page=0, edit=False)
+    await _send_inn_change_org_list(message, actor_tg_user_id=message.from_user.id, page=0, edit=False)
 
 
 @router.message(ManagerInnChangeStates.old_inn)
@@ -644,11 +828,14 @@ async def manager_change_inn_confirm_yes(callback: CallbackQuery, state: FSMCont
 @router.message(F.text == MANAGER_MENU_MERGE_ORGS)
 async def manager_merge_start(message: Message, state: FSMContext) -> None:
     if not is_admin(message.from_user.id):
-        await message.answer("Слияние компаний доступно только ADMIN.", reply_markup=manager_main_menu())
+        await message.answer(
+            "Слияние компаний доступно только ADMIN.",
+            reply_markup=_manager_main_menu_for(message.from_user.id),
+        )
         return
     await state.clear()
     await state.set_state(AdminMergeStates.choose_master)
-    await _send_merge_master_list(message, page=0, edit=False)
+    await _send_merge_master_list(message, actor_tg_user_id=message.from_user.id, page=0, edit=False)
 
 
 @router.callback_query(F.data.startswith("merge_master_page:"))
@@ -658,7 +845,12 @@ async def manager_merge_master_page(callback: CallbackQuery, state: FSMContext) 
         return
     _, page_s = callback.data.split(":")
     await state.set_state(AdminMergeStates.choose_master)
-    await _send_merge_master_list(callback.message, page=int(page_s), edit=True)
+    await _send_merge_master_list(
+        callback.message,
+        actor_tg_user_id=callback.from_user.id,
+        page=int(page_s),
+        edit=True,
+    )
 
 
 @router.callback_query(F.data.startswith("merge_master_pick:"))
@@ -671,11 +863,20 @@ async def manager_merge_master_pick(callback: CallbackQuery, state: FSMContext) 
     config = get_config()
     master_org = await sqlite.get_org_by_id(config.db_path, master_org_id)
     if not master_org or int(master_org["is_active"]) != 1:
-        await _send_merge_master_list(callback.message, page=0, edit=True)
+        await _send_merge_master_list(
+            callback.message, actor_tg_user_id=callback.from_user.id, page=0, edit=True
+        )
         return
     await state.set_state(AdminMergeStates.choose_joined)
     await state.update_data(merge_master_org_id=master_org_id, merge_joined_org_ids=[])
-    await _send_merge_joined_list(callback.message, master_org_id, set(), page=0, edit=True)
+    await _send_merge_joined_list(
+        callback.message,
+        actor_tg_user_id=callback.from_user.id,
+        master_org_id=master_org_id,
+        selected_ids=set(),
+        page=0,
+        edit=True,
+    )
 
 
 @router.callback_query(F.data.startswith("merge_join_page:"))
@@ -688,9 +889,18 @@ async def manager_merge_join_page(callback: CallbackQuery, state: FSMContext) ->
     master_org_id = int(data.get("merge_master_org_id", 0))
     selected = {int(x) for x in data.get("merge_joined_org_ids", [])}
     if master_org_id <= 0:
-        await _send_merge_master_list(callback.message, page=0, edit=True)
+        await _send_merge_master_list(
+            callback.message, actor_tg_user_id=callback.from_user.id, page=0, edit=True
+        )
         return
-    await _send_merge_joined_list(callback.message, master_org_id, selected, page=int(page_s), edit=True)
+    await _send_merge_joined_list(
+        callback.message,
+        actor_tg_user_id=callback.from_user.id,
+        master_org_id=master_org_id,
+        selected_ids=selected,
+        page=int(page_s),
+        edit=True,
+    )
 
 
 @router.callback_query(F.data.startswith("merge_join_toggle:"))
@@ -709,7 +919,14 @@ async def manager_merge_join_toggle(callback: CallbackQuery, state: FSMContext) 
     else:
         selected.add(org_id)
     await state.update_data(merge_joined_org_ids=sorted(selected))
-    await _send_merge_joined_list(callback.message, master_org_id, selected, page=page, edit=True)
+    await _send_merge_joined_list(
+        callback.message,
+        actor_tg_user_id=callback.from_user.id,
+        master_org_id=master_org_id,
+        selected_ids=selected,
+        page=page,
+        edit=True,
+    )
 
 
 @router.callback_query(F.data == "merge_clear")
@@ -720,7 +937,14 @@ async def manager_merge_clear(callback: CallbackQuery, state: FSMContext) -> Non
     data = await state.get_data()
     master_org_id = int(data.get("merge_master_org_id", 0))
     await state.update_data(merge_joined_org_ids=[])
-    await _send_merge_joined_list(callback.message, master_org_id, set(), page=0, edit=True)
+    await _send_merge_joined_list(
+        callback.message,
+        actor_tg_user_id=callback.from_user.id,
+        master_org_id=master_org_id,
+        selected_ids=set(),
+        page=0,
+        edit=True,
+    )
 
 
 @router.callback_query(F.data == "merge_step1")
@@ -742,7 +966,9 @@ async def manager_merge_step1(callback: CallbackQuery, state: FSMContext) -> Non
     master = all_orgs.get(master_org_id)
     joined_names = [f"- {all_orgs[j]['name']} — {all_orgs[j]['inn']}" for j in joined if j in all_orgs]
     if not master:
-        await _send_merge_master_list(callback.message, page=0, edit=True)
+        await _send_merge_master_list(
+            callback.message, actor_tg_user_id=callback.from_user.id, page=0, edit=True
+        )
         return
     await state.set_state(AdminMergeStates.confirm_step1)
     await callback.message.edit_text(
@@ -759,13 +985,11 @@ async def manager_merge_wait(callback: CallbackQuery, state: FSMContext) -> None
     await callback.answer()
     if not is_admin(callback.from_user.id):
         return
-    delay_sec = get_config().merge_confirm_delay_sec
     await state.set_state(AdminMergeStates.confirm_step2)
     await callback.message.edit_text(
-        f"Финальное подтверждение будет доступно через {delay_sec} сек...",
-        reply_markup=build_inline_keyboard([("❌ Отмена", "merge_cancel")]),
+        "Финальное подтверждение доступно сразу.\nПроверьте выбранные компании и подтвердите действие.",
+        reply_markup=_merge_confirm_step2_keyboard(),
     )
-    asyncio.create_task(_enable_merge_confirm(callback.message, delay_sec))
 
 
 @router.callback_query(F.data == "merge_execute")
@@ -776,6 +1000,32 @@ async def manager_merge_execute(callback: CallbackQuery, state: FSMContext) -> N
     data = await state.get_data()
     master_org_id = int(data.get("merge_master_org_id", 0))
     joined = [int(x) for x in data.get("merge_joined_org_ids", [])]
+    joined_key = ",".join(str(x) for x in sorted(joined))
+    config = get_config()
+    if is_rate_limited(
+        f"merge_execute:{callback.from_user.id}",
+        limit=config.merge_execute_limit,
+        window_sec=config.merge_execute_window_sec,
+    ):
+        await callback.answer("Слишком много попыток слияния. Подождите немного.", show_alert=True)
+        return
+    if is_rate_limited(
+        f"merge_execute_action:{callback.from_user.id}:{master_org_id}:{joined_key}",
+        limit=1,
+        window_sec=config.merge_execute_action_cooldown_sec,
+    ):
+        await callback.answer("Это слияние уже обрабатывается. Подождите немного.", show_alert=True)
+        return
+    if is_rate_limited(
+        f"merge_execute_global:{callback.from_user.id}",
+        limit=1,
+        window_sec=config.merge_execute_global_cooldown_sec,
+    ):
+        await callback.answer(
+            f"Новое слияние доступно через {config.merge_execute_global_cooldown_sec} сек.",
+            show_alert=True,
+        )
+        return
     if master_org_id <= 0 or not joined:
         await state.clear()
         await callback.message.edit_text(
@@ -783,7 +1033,6 @@ async def manager_merge_execute(callback: CallbackQuery, state: FSMContext) -> N
             reply_markup=build_inline_keyboard([("⬅️ В меню", "org_back_menu")]),
         )
         return
-    config = get_config()
     merged = await sqlite.merge_organizations(config.db_path, master_org_id, joined)
     if not merged:
         await state.clear()
@@ -821,7 +1070,10 @@ async def manager_merge_cancel(callback: CallbackQuery, state: FSMContext) -> No
 @router.message(F.text == MANAGER_MENU_GOALS_ADMIN)
 async def manager_goals_admin_open(message: Message, state: FSMContext) -> None:
     if not is_admin(message.from_user.id):
-        await message.answer("Раздел доступен только ADMIN.", reply_markup=manager_main_menu())
+        await message.answer(
+            "Раздел доступен только ADMIN.",
+            reply_markup=_manager_main_menu_for(message.from_user.id),
+        )
         return
     await state.clear()
     await message.answer("Админ-панель личных целей:", reply_markup=manager_goals_menu())
@@ -1021,8 +1273,9 @@ async def manager_goals_avg_create_submit(message: Message, state: FSMContext) -
         },
     )
     await state.clear()
+    user_label = _person_label(_row_full_name(user), tg_user_id)
     await message.answer(
-        f"Уровень создан (#{avg_level_id}) для {tg_user_id}.",
+        f"Уровень создан (#{avg_level_id}) для {user_label}.",
         reply_markup=manager_avg_levels_menu(),
     )
 
@@ -1033,57 +1286,206 @@ async def manager_broadcast_back(message: Message, state: FSMContext) -> None:
     await show_manager_menu(message)
 
 
-@router.message(ManagerBroadcastStates.target, F.text.in_({MANAGER_BROADCAST_ALL, MANAGER_BROADCAST_MY_ORGS}))
+@router.message(
+    ManagerBroadcastStates.target,
+    F.text.in_({MANAGER_BROADCAST_ALL, MANAGER_BROADCAST_MY_ORGS, MANAGER_BROADCAST_BY_ORG}),
+)
 async def manager_broadcast_target(message: Message, state: FSMContext) -> None:
-    target = "all" if message.text == MANAGER_BROADCAST_ALL else "my_orgs"
-    await state.update_data(target=target)
+    text = message.text or ""
+    if text == MANAGER_BROADCAST_ALL:
+        if not is_admin(message.from_user.id):
+            await message.answer(
+                "Режим «Всем продавцам» доступен только ADMIN.",
+                reply_markup=manager_broadcast_target_menu(is_admin_view=False),
+            )
+            return
+        await state.update_data(target="all", target_org_id=None, target_org_name=None)
+        await state.set_state(ManagerBroadcastStates.message)
+        await message.answer(
+            "Отправьте сообщение для рассылки.\n"
+            "Поддерживаются: текст, фото, видео, голосовые, кружки, файлы и др.",
+            reply_markup=manager_back_menu(),
+        )
+        return
+    if text == MANAGER_BROADCAST_MY_ORGS:
+        await state.update_data(target="my_orgs", target_org_id=None, target_org_name=None)
+        await state.set_state(ManagerBroadcastStates.message)
+        await message.answer(
+            "Отправьте сообщение для рассылки.\n"
+            "Поддерживаются: текст, фото, видео, голосовые, кружки, файлы и др.",
+            reply_markup=manager_back_menu(),
+        )
+        return
+    await state.update_data(target="org", target_org_id=None, target_org_name=None)
+    await state.set_state(ManagerBroadcastStates.choose_org)
+    await _send_broadcast_org_list(
+        message,
+        actor_tg_user_id=message.from_user.id,
+        page=0,
+        edit=False,
+    )
+
+
+@router.callback_query(ManagerBroadcastStates.choose_org, F.data == "br_org_back")
+async def manager_broadcast_org_back(callback: CallbackQuery, state: FSMContext) -> None:
+    await callback.answer()
+    await state.set_state(ManagerBroadcastStates.target)
+    await callback.message.answer(
+        "Кому отправить сообщение?",
+        reply_markup=manager_broadcast_target_menu(is_admin_view=is_admin(callback.from_user.id)),
+    )
+
+
+@router.message(ManagerBroadcastStates.choose_org, F.text == BACK_TEXT)
+async def manager_broadcast_org_back_text(message: Message, state: FSMContext) -> None:
+    await state.set_state(ManagerBroadcastStates.target)
+    await message.answer(
+        "Кому отправить сообщение?",
+        reply_markup=manager_broadcast_target_menu(is_admin_view=is_admin(message.from_user.id)),
+    )
+
+
+@router.callback_query(ManagerBroadcastStates.choose_org, F.data.startswith("br_org_page:"))
+async def manager_broadcast_org_page(callback: CallbackQuery) -> None:
+    await callback.answer()
+    _, page_s = callback.data.split(":")
+    await _send_broadcast_org_list(
+        callback.message,
+        actor_tg_user_id=callback.from_user.id,
+        page=int(page_s),
+        edit=True,
+    )
+
+
+@router.callback_query(ManagerBroadcastStates.choose_org, F.data.startswith("br_org_pick:"))
+async def manager_broadcast_org_pick(callback: CallbackQuery, state: FSMContext) -> None:
+    await callback.answer()
+    _, org_id_s, _page_s = callback.data.split(":")
+    org_id = int(org_id_s)
+    config = get_config()
+    org = await sqlite.get_org_by_id(config.db_path, org_id)
+    if not org or not _can_access_org(callback.from_user.id, org):
+        await callback.answer("Организация недоступна.", show_alert=True)
+        return
+    await state.update_data(
+        target="org",
+        target_org_id=org_id,
+        target_org_name=str(org["name"]),
+    )
     await state.set_state(ManagerBroadcastStates.message)
-    await message.answer("Введите текст рассылки.", reply_markup=manager_back_menu())
+    await callback.message.answer(
+        f"Выбрана компания: {org['name']} ({org['inn']}).\n"
+        "Отправьте сообщение для рассылки (текст или любой поддерживаемый медиа-тип).",
+        reply_markup=manager_back_menu(),
+    )
 
 
 @router.message(ManagerBroadcastStates.message, F.text == BACK_TEXT)
 async def manager_broadcast_message_back(message: Message, state: FSMContext) -> None:
+    data = await state.get_data()
+    if data.get("target") == "org":
+        await state.set_state(ManagerBroadcastStates.choose_org)
+        await _send_broadcast_org_list(
+            message,
+            actor_tg_user_id=message.from_user.id,
+            page=0,
+            edit=False,
+        )
+        return
     await state.set_state(ManagerBroadcastStates.target)
-    await message.answer("Кому отправить сообщение?", reply_markup=manager_broadcast_target_menu())
+    await message.answer(
+        "Кому отправить сообщение?",
+        reply_markup=manager_broadcast_target_menu(is_admin_view=is_admin(message.from_user.id)),
+    )
 
 
 @router.message(ManagerBroadcastStates.message)
 async def manager_broadcast_message(message: Message, state: FSMContext) -> None:
-    if not message.text:
-        await message.answer("Введите текст рассылки или нажмите ⬅️ Назад.")
+    content_type = str(message.content_type or "")
+    if _is_service_message_type(content_type):
+        await message.answer(
+            "Сервисные сообщения Telegram нельзя использовать в рассылке.\n"
+            "Отправьте обычный контент: текст, фото, видео, кружок, файл, контакт, гео и т.д."
+        )
         return
-    await state.update_data(text=message.text.strip())
-    await state.set_state(ManagerBroadcastStates.confirm)
-    await message.answer(
-        "Отправить это сообщение?",
-        reply_markup=manager_broadcast_confirm_menu(),
+    text_payload = (message.text or message.caption or "").strip()
+    await state.update_data(
+        source_chat_id=message.chat.id,
+        source_message_id=message.message_id,
+        content_type=content_type,
+        text=text_payload,
     )
+    await state.set_state(ManagerBroadcastStates.confirm)
+    data = await state.get_data()
+    target = str(data.get("target", "all"))
+    content_preview = _broadcast_content_preview(content_type, text_payload)
+    if target == "org":
+        org_name = str(data.get("target_org_name") or "не выбрана")
+        prompt = f"Отправить это сообщение ({content_preview}) в компанию «{org_name}»?"
+    elif target == "my_orgs":
+        prompt = f"Отправить это сообщение ({content_preview}) продавцам ваших компаний?"
+    else:
+        prompt = f"Отправить это сообщение ({content_preview}) всем продавцам?"
+    await message.answer(prompt, reply_markup=manager_broadcast_confirm_menu())
 
 
 @router.message(ManagerBroadcastStates.confirm, F.text == BACK_TEXT)
 async def manager_broadcast_confirm_back(message: Message, state: FSMContext) -> None:
     await state.set_state(ManagerBroadcastStates.message)
-    await message.answer("Введите текст рассылки.", reply_markup=manager_back_menu())
+    await message.answer(
+        "Отправьте сообщение для рассылки (текст или медиа).",
+        reply_markup=manager_back_menu(),
+    )
 
 
 @router.message(ManagerBroadcastStates.confirm, F.text == MANAGER_BROADCAST_CONFIRM)
 async def manager_broadcast_send(message: Message, state: FSMContext) -> None:
     data = await state.get_data()
     target = data.get("target")
-    text = data.get("text")
-    if not text:
-        await message.answer("Текст рассылки пуст.", reply_markup=manager_main_menu())
+    source_chat_id = data.get("source_chat_id")
+    source_message_id = data.get("source_message_id")
+    content_type = str(data.get("content_type") or "")
+    if source_chat_id is None or source_message_id is None:
+        await message.answer(
+            "Сообщение для рассылки не выбрано.",
+            reply_markup=_manager_main_menu_for(message.from_user.id),
+        )
         await state.clear()
         return
     config = get_config()
     if target == "all":
+        if not is_admin(message.from_user.id):
+            await message.answer(
+                "Режим «Всем продавцам» доступен только ADMIN.",
+                reply_markup=manager_broadcast_target_menu(is_admin_view=False),
+            )
+            await state.set_state(ManagerBroadcastStates.target)
+            return
         recipients = await sqlite.list_all_seller_ids(config.db_path)
+        target_meta = {"target": "all"}
+    elif target == "org":
+        org_id = int(data.get("target_org_id") or 0)
+        org = await sqlite.get_org_by_id(config.db_path, org_id) if org_id > 0 else None
+        if not org or not _can_access_org(message.from_user.id, org):
+            await message.answer(
+                "Компания для рассылки недоступна. Выберите получателей заново.",
+                reply_markup=manager_broadcast_target_menu(is_admin_view=is_admin(message.from_user.id)),
+            )
+            await state.set_state(ManagerBroadcastStates.target)
+            return
+        recipients = await sqlite.list_seller_ids_by_org(config.db_path, org_id)
+        target_meta = {"target": "org", "org_id": org_id, "org_name": str(org["name"])}
     else:
         recipients = await sqlite.list_seller_ids_by_manager(config.db_path, message.from_user.id)
+        target_meta = {"target": "my_orgs"}
     sent = 0
     for tg_user_id in recipients:
         try:
-            await message.bot.send_message(tg_user_id, text)
+            await message.bot.copy_message(
+                chat_id=tg_user_id,
+                from_chat_id=int(source_chat_id),
+                message_id=int(source_message_id),
+            )
             sent += 1
         except Exception:
             logger.exception("Failed to send broadcast to %s", tg_user_id)
@@ -1091,12 +1493,15 @@ async def manager_broadcast_send(message: Message, state: FSMContext) -> None:
     await sqlite.log_audit(
         config.db_path,
         actor_tg_user_id=message.from_user.id,
-        actor_role="manager",
+        actor_role="admin" if is_admin(message.from_user.id) else "manager",
         action="MANAGER_BROADCAST",
-        payload={"target": target, "sent": sent},
+        payload={**target_meta, "content_type": content_type, "recipients": len(recipients), "sent": sent},
     )
     await state.clear()
-    await message.answer(f"Рассылка завершена. Отправлено: {sent}", reply_markup=manager_main_menu())
+    await message.answer(
+        f"Рассылка завершена. Отправлено: {sent}",
+        reply_markup=_manager_main_menu_for(message.from_user.id),
+    )
 
 
 @router.message(F.text == MANAGER_MENU_EXPORT_RATINGS)
@@ -1144,7 +1549,10 @@ async def manager_export_ratings_run(message: Message, state: FSMContext) -> Non
         )
     except Exception:
         logger.exception("Failed to export ratings")
-        await message.answer("Не удалось сформировать выгрузку.", reply_markup=manager_main_menu())
+        await message.answer(
+            "Не удалось сформировать выгрузку.",
+            reply_markup=_manager_main_menu_for(message.from_user.id),
+        )
     finally:
         if path is not None:
             try:
@@ -1200,18 +1608,42 @@ async def manager_sync_current_month(message: Message, state: FSMContext) -> Non
             f"Записано/обновлено в базу: {sync_result.upserted_count}\n"
             f"Новых строк: {sync_result.inserted_count}\n"
             f"Push-уведомлений отправлено: {push_sent}",
-            reply_markup=manager_main_menu(),
+            reply_markup=_manager_main_menu_for(message.from_user.id),
         )
     except OnecClientError as exc:
+        logger.warning(
+            "Turnover sync failed (current month): status=%s code=%s actor=%s",
+            getattr(exc, "status_code", None),
+            getattr(exc, "code", "ONEC_ERROR"),
+            message.from_user.id,
+        )
+        try:
+            await sqlite.log_audit(
+                config.db_path,
+                actor_tg_user_id=message.from_user.id,
+                actor_role="manager",
+                action="SYNC_TURNOVER_ERROR",
+                payload={
+                    "mode": "current_month",
+                    "operationType": operation_type,
+                    "start": start.isoformat(),
+                    "end": end.isoformat(),
+                    "status_code": getattr(exc, "status_code", None),
+                    "error_code": getattr(exc, "code", "ONEC_ERROR"),
+                    "error": str(exc),
+                },
+            )
+        except Exception:
+            logger.exception("Failed to write sync error audit (current month)")
         await message.answer(
-            f"❌ Ошибка 1С: {exc}",
-            reply_markup=manager_main_menu(),
+            _render_onec_error(exc),
+            reply_markup=_manager_main_menu_for(message.from_user.id),
         )
     except Exception as exc:
         logger.exception("Failed to sync turnover (current month)")
         await message.answer(
             f"❌ Ошибка обновления базы: {exc}",
-            reply_markup=manager_main_menu(),
+            reply_markup=_manager_main_menu_for(message.from_user.id),
         )
 
 
@@ -1276,18 +1708,42 @@ async def manager_sync_custom_range(message: Message, state: FSMContext) -> None
             f"Записано/обновлено в базу: {sync_result.upserted_count}\n"
             f"Новых строк: {sync_result.inserted_count}\n"
             f"Push-уведомлений отправлено: {push_sent}",
-            reply_markup=manager_main_menu(),
+            reply_markup=_manager_main_menu_for(message.from_user.id),
         )
     except OnecClientError as exc:
+        logger.warning(
+            "Turnover sync failed (custom range): status=%s code=%s actor=%s",
+            getattr(exc, "status_code", None),
+            getattr(exc, "code", "ONEC_ERROR"),
+            message.from_user.id,
+        )
+        try:
+            await sqlite.log_audit(
+                config.db_path,
+                actor_tg_user_id=message.from_user.id,
+                actor_role="manager",
+                action="SYNC_TURNOVER_ERROR",
+                payload={
+                    "mode": "custom_range",
+                    "operationType": operation_type,
+                    "start": start.isoformat(),
+                    "end": end.isoformat(),
+                    "status_code": getattr(exc, "status_code", None),
+                    "error_code": getattr(exc, "code", "ONEC_ERROR"),
+                    "error": str(exc),
+                },
+            )
+        except Exception:
+            logger.exception("Failed to write sync error audit (custom range)")
         await message.answer(
-            f"❌ Ошибка 1С: {exc}",
-            reply_markup=manager_main_menu(),
+            _render_onec_error(exc),
+            reply_markup=_manager_main_menu_for(message.from_user.id),
         )
     except Exception as exc:
         logger.exception("Failed to sync turnover (custom range)")
         await message.answer(
             f"❌ Ошибка обновления базы: {exc}",
-            reply_markup=manager_main_menu(),
+            reply_markup=_manager_main_menu_for(message.from_user.id),
         )
 
 
@@ -1440,7 +1896,7 @@ async def manager_back_to_menu(message: Message, state: FSMContext) -> None:
 async def manager_org_list(message: Message) -> None:
     if not is_manager_or_admin(message.from_user.id):
         return
-    await _send_org_list(message, page=0)
+    await _send_org_list(message, actor_tg_user_id=message.from_user.id, page=0)
 
 
 @router.callback_query(F.data.startswith("org_page"))
@@ -1460,7 +1916,9 @@ async def manager_org_list_page(callback: CallbackQuery) -> None:
     except ValueError:
         await callback.answer()
         return
-    await _send_org_list(callback.message, page=page, edit=True)
+    await _send_org_list(
+        callback.message, actor_tg_user_id=callback.from_user.id, page=page, edit=True
+    )
     await callback.answer()
 
 
@@ -1469,30 +1927,43 @@ async def manager_org_back_menu(callback: CallbackQuery) -> None:
     if not is_manager_or_admin(callback.from_user.id):
         await callback.answer()
         return
-    await callback.message.answer("Вы вошли как Менеджер.", reply_markup=manager_main_menu())
+    role_name = "Администратор" if is_admin(callback.from_user.id) else "Менеджер"
+    await clear_active_inline_menu(callback.message, callback.from_user.id)
+    await callback.message.answer(
+        f"Вы вошли как {role_name}.",
+        reply_markup=_manager_main_menu_for(callback.from_user.id),
+    )
     await callback.answer()
 
 
-async def _send_org_list(message: Message, page: int, edit: bool = False) -> None:
+async def _send_org_list(
+    message: Message, actor_tg_user_id: int, page: int, edit: bool = False
+) -> None:
     config = get_config()
-    if is_admin(message.from_user.id):
+    if is_admin(actor_tg_user_id):
         total = await sqlite.count_orgs(config.db_path)
     else:
-        total = await sqlite.count_orgs_by_manager(config.db_path, message.from_user.id)
+        total = await sqlite.count_orgs_by_manager(config.db_path, actor_tg_user_id)
     total_pages = max(1, ceil(total / PAGE_SIZE))
     page = max(0, min(page, total_pages - 1))
-    if is_admin(message.from_user.id):
+    if is_admin(actor_tg_user_id):
         orgs = await sqlite.list_orgs(config.db_path, PAGE_SIZE, page * PAGE_SIZE)
     else:
         orgs = await sqlite.list_orgs_by_manager(
-            config.db_path, message.from_user.id, PAGE_SIZE, page * PAGE_SIZE
+            config.db_path, actor_tg_user_id, PAGE_SIZE, page * PAGE_SIZE
         )
     keyboard = _org_list_keyboard(orgs, page, total_pages)
     text = "Ваши организации:" if total else "У вас пока нет организаций."
     if edit:
         await message.edit_text(text, reply_markup=keyboard)
+        await mark_inline_menu_active(message, actor_tg_user_id)
     else:
-        await message.answer(text, reply_markup=keyboard)
+        await send_single_inline_menu(
+            message,
+            actor_tg_user_id=actor_tg_user_id,
+            text=text,
+            reply_markup=keyboard,
+        )
 
 
 async def _send_org_card(
@@ -1501,7 +1972,7 @@ async def _send_org_card(
     config = get_config()
     org = await sqlite.get_org_by_id(config.db_path, org_id)
     if not org or not _can_access_org(user_id, org):
-        await message.answer("Организация не найдена.", reply_markup=manager_main_menu())
+        await message.answer("Организация не найдена.", reply_markup=_manager_main_menu_for(user_id))
         return
     await sqlite.log_audit(
         config.db_path,
@@ -1520,7 +1991,12 @@ async def _send_org_card(
         f"Активных ROP: {rop_count}"
     )
     keyboard = _org_card_keyboard(org_id, back_page)
-    await message.answer(text, reply_markup=keyboard)
+    await send_single_inline_menu(
+        message,
+        actor_tg_user_id=user_id,
+        text=text,
+        reply_markup=keyboard,
+    )
 
 
 @router.callback_query(F.data.startswith("org_open"))
@@ -1570,7 +2046,10 @@ async def manager_staff_profile(callback: CallbackQuery) -> None:
     config = get_config()
     org = await sqlite.get_org_by_id(config.db_path, org_id)
     if not org or not _can_access_org(callback.from_user.id, org):
-        await callback.message.answer("Организация не найдена.", reply_markup=manager_main_menu())
+        await callback.message.answer(
+            "Организация не найдена.",
+            reply_markup=_manager_main_menu_for(callback.from_user.id),
+        )
         await callback.answer()
         return
     user = await sqlite.get_user_by_tg_id(config.db_path, target_tg_user_id)
@@ -1595,10 +2074,10 @@ async def manager_staff_profile(callback: CallbackQuery) -> None:
     challenge_line = ""
     if challenge:
         if challenge.completed:
-            challenge_line = "Челлендж выполнен ✅\n"
+            challenge_line = "Испытание месяца пройдено ✅\n"
         else:
             challenge_line = (
-                f"Челлендж: {challenge.progress_volume:g}/{challenge.target_volume:g} л\n"
+                f"Испытание месяца: {challenge.progress_volume:g}/{challenge.target_volume:g} л\n"
             )
     league_line = f"Лига: {league.name}"
     if league.to_next_volume is not None:
@@ -1606,11 +2085,10 @@ async def manager_staff_profile(callback: CallbackQuery) -> None:
     registered_at = format_iso_human(user["registered_at"])
     has_req = await sqlite.has_requisites(config.db_path, target_tg_user_id)
     requisites_line = "Реквизиты указаны: Да" if has_req else "Реквизиты указаны: Нет"
-    full_name = (user["full_name"] or "").strip() or f"ID {target_tg_user_id}"
+    user_label = _person_label(_row_full_name(user), target_tg_user_id)
     profile_text = (
         "Профиль сотрудника:\n"
-        f"ФИО: {_escape_html(full_name)}\n"
-        f"ID: {target_tg_user_id}\n"
+        f"Сотрудник: {_escape_html(user_label)}\n"
         f"Дата регистрации: {registered_at}\n"
         f"{requisites_line}\n\n"
         + challenge_line
@@ -1657,7 +2135,10 @@ async def manager_org_staff(callback: CallbackQuery) -> None:
     config = get_config()
     org = await sqlite.get_org_by_id(config.db_path, org_id)
     if not org or not _can_access_org(callback.from_user.id, org):
-        await callback.message.answer("Организация не найдена.", reply_markup=manager_main_menu())
+        await callback.message.answer(
+            "Организация не найдена.",
+            reply_markup=_manager_main_menu_for(callback.from_user.id),
+        )
         await callback.answer()
         return
     total = await sqlite.count_sellers_by_org(config.db_path, org_id)
@@ -1712,7 +2193,10 @@ async def manager_org_reset_confirm(callback: CallbackQuery) -> None:
     config = get_config()
     org = await sqlite.get_org_by_id(config.db_path, org_id_int)
     if not org or not _can_access_org(callback.from_user.id, org):
-        await callback.message.answer("Организация не найдена.", reply_markup=manager_main_menu())
+        await callback.message.answer(
+            "Организация не найдена.",
+            reply_markup=_manager_main_menu_for(callback.from_user.id),
+        )
         await callback.answer()
         return
     password_plain = generate_password()
@@ -1765,7 +2249,10 @@ async def manager_fire_rop_menu(message: Message) -> None:
         orgs = await sqlite.list_orgs_by_manager(config.db_path, message.from_user.id, 100, 0)
     org_list = [dict(r) for r in orgs]
     if not org_list:
-        await message.answer("Нет доступных организаций.", reply_markup=manager_main_menu())
+        await message.answer(
+            "Нет доступных организаций.",
+            reply_markup=_manager_main_menu_for(message.from_user.id),
+        )
         return
     await message.answer("Выберите организацию для управления РОП:", reply_markup=_fire_rop_orgs_keyboard(org_list))
 
@@ -1780,7 +2267,10 @@ async def manager_fire_rop_org(callback: CallbackQuery) -> None:
     config = get_config()
     org = await sqlite.get_org_by_id(config.db_path, org_id)
     if not org or not _can_access_org(callback.from_user.id, org):
-        await callback.message.answer("Организация не найдена.", reply_markup=manager_main_menu())
+        await callback.message.answer(
+            "Организация не найдена.",
+            reply_markup=_manager_main_menu_for(callback.from_user.id),
+        )
         return
     active_rops = [dict(r) for r in await sqlite.list_active_rops_by_org(config.db_path, org_id)]
     fired_rops = [dict(r) for r in await sqlite.list_fired_rops_by_org(config.db_path, org_id)]
@@ -1970,4 +2460,7 @@ async def manager_back(message: Message) -> None:
 async def manager_fallback(message: Message) -> None:
     if not is_manager_or_admin(message.from_user.id):
         return
-    await message.answer("Пожалуйста, выберите пункт меню.", reply_markup=manager_main_menu())
+    await message.answer(
+        "Пожалуйста, выберите пункт меню.",
+        reply_markup=_manager_main_menu_for(message.from_user.id),
+    )

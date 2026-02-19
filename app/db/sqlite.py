@@ -211,6 +211,16 @@ async def init_db(db_path: str) -> None:
         )
         await db.execute(
             """
+            CREATE TABLE IF NOT EXISTS sale_dispute_claims (
+                dispute_id INTEGER NOT NULL,
+                claim_id INTEGER NOT NULL,
+                created_at TEXT NOT NULL,
+                UNIQUE(dispute_id, claim_id)
+            )
+            """
+        )
+        await db.execute(
+            """
             CREATE TABLE IF NOT EXISTS ratings_all_time (
                 tg_user_id INTEGER PRIMARY KEY,
                 org_id INTEGER NOT NULL,
@@ -482,6 +492,18 @@ async def init_db(db_path: str) -> None:
             """
             CREATE INDEX IF NOT EXISTS idx_sale_disputes_claimed_by
             ON sale_disputes(claimed_by_tg_user_id, status)
+            """
+        )
+        await db.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_sale_dispute_claims_dispute
+            ON sale_dispute_claims(dispute_id)
+            """
+        )
+        await db.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_sale_dispute_claims_claim
+            ON sale_dispute_claims(claim_id)
             """
         )
         await db.execute(
@@ -1115,6 +1137,19 @@ async def list_seller_ids_by_manager(db_path: str, manager_id: int) -> List[int]
     return [int(r["tg_user_id"]) for r in rows]
 
 
+async def list_seller_ids_by_org(db_path: str, org_id: int) -> List[int]:
+    rows = await fetch_all(
+        db_path,
+        """
+        SELECT tg_user_id
+        FROM users
+        WHERE org_id = ? AND role IN ('seller','rop') AND status = 'active'
+        """,
+        (org_id,),
+    )
+    return [int(r["tg_user_id"]) for r in rows]
+
+
 async def get_user_by_tg_id(db_path: str, tg_user_id: int) -> Optional[aiosqlite.Row]:
     return await fetch_one(db_path, "SELECT * FROM users WHERE tg_user_id = ?", (tg_user_id,))
 
@@ -1187,18 +1222,19 @@ async def update_last_seen(db_path: str, tg_user_id: int) -> None:
     )
 
 
-async def is_nickname_taken(db_path: str, company_group_id: int, nickname: str) -> bool:
+async def is_nickname_taken(
+    db_path: str, nickname: str, exclude_tg_user_id: int | None = None
+) -> bool:
     row = await fetch_one(
         db_path,
         """
         SELECT 1 AS ok
         FROM users
-        WHERE company_group_id = ?
-          AND lower(nickname) = lower(?)
-          AND status = 'active'
+        WHERE lower(nickname) = lower(?)
+          AND (? IS NULL OR tg_user_id <> ?)
         LIMIT 1
         """,
-        (company_group_id, nickname),
+        (nickname, exclude_tg_user_id, exclude_tg_user_id),
     )
     return row is not None
 
@@ -1591,9 +1627,15 @@ async def list_finance_months(db_path: str, tg_user_id: int) -> list[str]:
         db_path,
         """
         SELECT month FROM (
+            SELECT substr(t.period, 1, 7) AS month
+            FROM sales_claims c
+            JOIN chz_turnover t ON t.id = c.turnover_id
+            WHERE c.claimed_by_tg_user_id = ?
+            UNION
             SELECT substr(created_at, 1, 7) AS month
             FROM medcoin_ledger
             WHERE tg_user_id = ?
+              AND (related_entity_type IS NULL OR related_entity_type != 'sales_claim')
             UNION
             SELECT substr(requested_at, 1, 7) AS month
             FROM withdrawal_requests
@@ -1602,7 +1644,7 @@ async def list_finance_months(db_path: str, tg_user_id: int) -> list[str]:
         WHERE month IS NOT NULL AND length(month) = 7
         ORDER BY month DESC
         """,
-        (tg_user_id, tg_user_id),
+        (tg_user_id, tg_user_id, tg_user_id),
     )
     return [str(r["month"]) for r in rows]
 
@@ -1612,13 +1654,35 @@ async def get_month_ledger_totals(db_path: str, tg_user_id: int, month: str) -> 
         db_path,
         """
         SELECT
-            COALESCE(SUM(CASE WHEN entry_kind = 'earn' THEN amount ELSE 0 END), 0) AS earned,
+            COALESCE(
+                SUM(
+                    CASE
+                        WHEN l.entry_kind = 'earn'
+                             AND l.related_entity_type = 'sales_claim'
+                             AND substr(t.period, 1, 7) = :month
+                        THEN l.amount
+                        WHEN l.entry_kind = 'earn'
+                             AND (l.related_entity_type IS NULL OR l.related_entity_type != 'sales_claim')
+                             AND substr(l.created_at, 1, 7) = :month
+                        THEN l.amount
+                        ELSE 0
+                    END
+                ),
+                0
+            ) AS earned,
             COALESCE(SUM(CASE WHEN entry_kind = 'withdraw' THEN ABS(amount) ELSE 0 END), 0) AS withdrawn
-        FROM medcoin_ledger
-        WHERE tg_user_id = ?
-          AND substr(created_at, 1, 7) = ?
+        FROM medcoin_ledger l
+        LEFT JOIN sales_claims c
+          ON l.related_entity_type = 'sales_claim'
+         AND l.related_entity_id = c.id
+        LEFT JOIN chz_turnover t ON t.id = c.turnover_id
+        WHERE l.tg_user_id = :tg_user_id
+          AND (
+            substr(l.created_at, 1, 7) = :month
+            OR (l.related_entity_type = 'sales_claim' AND substr(t.period, 1, 7) = :month)
+          )
         """,
-        (tg_user_id, month),
+        {"tg_user_id": tg_user_id, "month": month},
     )
     return {
         "earned": float(row["earned"]) if row else 0.0,
@@ -1632,16 +1696,26 @@ async def list_month_bonus_breakdown(
     rows = await fetch_all(
         db_path,
         """
-        SELECT stage_code, COALESCE(SUM(amount), 0) AS amount
-        FROM medcoin_ledger
-        WHERE tg_user_id = ?
-          AND entry_kind = 'earn'
-          AND substr(created_at, 1, 7) = ?
-        GROUP BY stage_code
-        HAVING ABS(COALESCE(SUM(amount), 0)) > 0.000001
-        ORDER BY stage_code
+        SELECT l.stage_code, COALESCE(SUM(l.amount), 0) AS amount
+        FROM medcoin_ledger l
+        LEFT JOIN sales_claims c
+          ON l.related_entity_type = 'sales_claim'
+         AND l.related_entity_id = c.id
+        LEFT JOIN chz_turnover t ON t.id = c.turnover_id
+        WHERE l.tg_user_id = :tg_user_id
+          AND l.entry_kind = 'earn'
+          AND (
+            (l.related_entity_type = 'sales_claim' AND substr(t.period, 1, 7) = :month)
+            OR (
+                (l.related_entity_type IS NULL OR l.related_entity_type != 'sales_claim')
+                AND substr(l.created_at, 1, 7) = :month
+            )
+          )
+        GROUP BY l.stage_code
+        HAVING ABS(COALESCE(SUM(l.amount), 0)) > 0.000001
+        ORDER BY l.stage_code
         """,
-        (tg_user_id, month),
+        {"tg_user_id": tg_user_id, "month": month},
     )
     return [{"stage_code": str(r["stage_code"]), "amount": float(r["amount"])} for r in rows]
 
@@ -2384,6 +2458,173 @@ async def list_unclaimed_turnover_by_inns(
     )
 
 
+async def count_unclaimed_turnover_groups_by_inns(
+    db_path: str, seller_inns: list[str], launch_date_iso: str | None = None
+) -> int:
+    if not seller_inns:
+        return 0
+    placeholders = ",".join("?" for _ in seller_inns)
+    where_launch = " AND substr(t.period, 1, 10) >= ? " if launch_date_iso else ""
+    params: tuple = tuple(seller_inns) + ((launch_date_iso,) if launch_date_iso else ())
+    row = await fetch_one(
+        db_path,
+        f"""
+        SELECT COUNT(*) AS cnt
+        FROM (
+            SELECT substr(t.period, 1, 10) AS period_date, t.buyer_inn
+            FROM chz_turnover t
+            LEFT JOIN sales_claims c ON c.turnover_id = t.id
+            WHERE t.seller_inn IN ({placeholders}) AND c.turnover_id IS NULL {where_launch}
+            GROUP BY period_date, t.buyer_inn
+        ) g
+        """,
+        params,
+    )
+    return int(row["cnt"]) if row else 0
+
+
+async def list_unclaimed_turnover_groups_by_inns(
+    db_path: str,
+    seller_inns: list[str],
+    limit: int,
+    offset: int,
+    launch_date_iso: str | None = None,
+) -> List[aiosqlite.Row]:
+    if not seller_inns:
+        return []
+    placeholders = ",".join("?" for _ in seller_inns)
+    where_launch = " AND substr(t.period, 1, 10) >= ? " if launch_date_iso else ""
+    params: tuple = tuple(seller_inns)
+    if launch_date_iso:
+        params = params + (launch_date_iso,)
+    params = params + (limit, offset)
+    return await fetch_all(
+        db_path,
+        f"""
+        SELECT
+            substr(t.period, 1, 10) AS period_date,
+            t.buyer_inn AS buyer_inn,
+            MAX(t.buyer_name) AS buyer_name,
+            COUNT(*) AS rows_count,
+            SUM(t.volume_goods) AS total_volume
+        FROM chz_turnover t
+        LEFT JOIN sales_claims c ON c.turnover_id = t.id
+        WHERE t.seller_inn IN ({placeholders}) AND c.turnover_id IS NULL {where_launch}
+        GROUP BY period_date, t.buyer_inn
+        ORDER BY period_date DESC, buyer_inn ASC
+        LIMIT ? OFFSET ?
+        """,
+        params,
+    )
+
+
+async def list_unclaimed_turnover_rows_by_group(
+    db_path: str,
+    seller_inns: list[str],
+    period_date: str,
+    buyer_inn: str,
+    launch_date_iso: str | None = None,
+) -> List[aiosqlite.Row]:
+    if not seller_inns:
+        return []
+    placeholders = ",".join("?" for _ in seller_inns)
+    where_launch = " AND substr(t.period, 1, 10) >= ? " if launch_date_iso else ""
+    params: tuple = tuple(seller_inns) + (period_date, buyer_inn)
+    if launch_date_iso:
+        params = params + (launch_date_iso,)
+    return await fetch_all(
+        db_path,
+        f"""
+        SELECT
+            t.id,
+            t.period,
+            t.nomenclature,
+            t.volume_goods,
+            t.buyer_inn,
+            t.buyer_name
+        FROM chz_turnover t
+        LEFT JOIN sales_claims c ON c.turnover_id = t.id
+        WHERE t.seller_inn IN ({placeholders})
+          AND c.turnover_id IS NULL
+          AND substr(t.period, 1, 10) = ?
+          AND t.buyer_inn = ?
+          {where_launch}
+        ORDER BY t.nomenclature ASC, t.id ASC
+        """,
+        params,
+    )
+
+
+async def claim_turnover_group_by_inns(
+    db_path: str,
+    seller_inns: list[str],
+    period_date: str,
+    buyer_inn: str,
+    tg_user_id: int,
+    launch_date_iso: str | None = None,
+) -> List[int]:
+    user = await get_user_by_tg_id(db_path, tg_user_id)
+    if not user:
+        raise ValueError("User is not registered")
+    if not seller_inns:
+        return []
+    placeholders = ",".join("?" for _ in seller_inns)
+    where_launch = " AND substr(t.period, 1, 10) >= ? " if launch_date_iso else ""
+    now_iso = now_utc_iso()
+    async with aiosqlite.connect(db_path) as db:
+        db.row_factory = aiosqlite.Row
+        await db.execute("BEGIN IMMEDIATE")
+        select_params: list[Any] = [*seller_inns, period_date, buyer_inn]
+        if launch_date_iso:
+            select_params.append(launch_date_iso)
+        cur = await db.execute(
+            f"""
+            SELECT t.id
+            FROM chz_turnover t
+            LEFT JOIN sales_claims c ON c.turnover_id = t.id
+            WHERE t.seller_inn IN ({placeholders})
+              AND c.turnover_id IS NULL
+              AND substr(t.period, 1, 10) = ?
+              AND t.buyer_inn = ?
+              {where_launch}
+            ORDER BY t.id
+            """,
+            tuple(select_params),
+        )
+        rows = await cur.fetchall()
+        turnover_ids = [int(r["id"]) for r in rows]
+        if not turnover_ids:
+            await db.rollback()
+            return []
+        claimed_ids: list[int] = []
+        for turnover_id in turnover_ids:
+            claim_cur = await db.execute(
+                """
+                INSERT INTO sales_claims (
+                    turnover_id,
+                    claimed_by_tg_user_id,
+                    claimed_at,
+                    company_group_id_at_claim,
+                    org_id_at_claim
+                )
+                VALUES (?, ?, ?, ?, ?)
+                RETURNING id
+                """,
+                (
+                    turnover_id,
+                    tg_user_id,
+                    now_iso,
+                    int(user["company_group_id"]),
+                    int(user["org_id"]),
+                ),
+            )
+            claim_row = await claim_cur.fetchone()
+            if claim_row:
+                claimed_ids.append(int(claim_row["id"]))
+        await db.commit()
+    return claimed_ids
+
+
 async def get_turnover_by_id(db_path: str, turnover_id: int) -> Optional[aiosqlite.Row]:
     return await fetch_one(db_path, "SELECT * FROM chz_turnover WHERE id = ?", (turnover_id,))
 
@@ -2443,6 +2684,7 @@ async def list_claimed_sales_for_dispute(
         SELECT
             c.id AS claim_id,
             c.turnover_id AS turnover_id,
+            c.company_group_id_at_claim AS company_group_id_at_claim,
             c.claimed_by_tg_user_id AS claimed_by_tg_user_id,
             c.claimed_at AS claimed_at,
             COALESCE(u.full_name, '') AS claimed_by_full_name,
@@ -2486,6 +2728,118 @@ async def count_claimed_sales_for_dispute(
         tuple(params),
     )
     return int(row["cnt"]) if row else 0
+
+
+async def count_claimed_sale_groups_for_dispute(
+    db_path: str,
+    company_group_id: int,
+    viewer_tg_user_id: int,
+    viewer_role: str,
+) -> int:
+    params: list[Any] = [company_group_id]
+    where_own = ""
+    if viewer_role == "seller":
+        where_own = " AND c.claimed_by_tg_user_id <> ? "
+        params.append(viewer_tg_user_id)
+    row = await fetch_one(
+        db_path,
+        f"""
+        SELECT COUNT(*) AS cnt
+        FROM (
+            SELECT substr(t.period, 1, 10) AS period_date, t.buyer_inn
+            FROM sales_claims c
+            JOIN chz_turnover t ON t.id = c.turnover_id
+            WHERE c.company_group_id_at_claim = ?
+              AND c.dispute_status <> 'open'
+              {where_own}
+            GROUP BY period_date, t.buyer_inn
+        ) g
+        """,
+        tuple(params),
+    )
+    return int(row["cnt"]) if row else 0
+
+
+async def list_claimed_sale_groups_for_dispute(
+    db_path: str,
+    company_group_id: int,
+    viewer_tg_user_id: int,
+    viewer_role: str,
+    limit: int,
+    offset: int,
+) -> List[aiosqlite.Row]:
+    params: list[Any] = [company_group_id]
+    where_own = ""
+    if viewer_role == "seller":
+        where_own = " AND c.claimed_by_tg_user_id <> ? "
+        params.append(viewer_tg_user_id)
+    params.extend([limit, offset])
+    return await fetch_all(
+        db_path,
+        f"""
+        SELECT
+            substr(t.period, 1, 10) AS period_date,
+            t.buyer_inn AS buyer_inn,
+            MAX(t.buyer_name) AS buyer_name,
+            COUNT(*) AS claims_count,
+            SUM(t.volume_goods) AS total_volume,
+            MIN(c.claimed_by_tg_user_id) AS claimed_by_tg_user_id,
+            MAX(COALESCE(u.full_name, '')) AS claimed_by_full_name,
+            COUNT(DISTINCT c.claimed_by_tg_user_id) AS claimed_by_count
+        FROM sales_claims c
+        JOIN chz_turnover t ON t.id = c.turnover_id
+        LEFT JOIN users u ON u.tg_user_id = c.claimed_by_tg_user_id
+        WHERE c.company_group_id_at_claim = ?
+          AND c.dispute_status <> 'open'
+          {where_own}
+        GROUP BY period_date, t.buyer_inn
+        ORDER BY period_date DESC, buyer_inn ASC
+        LIMIT ? OFFSET ?
+        """,
+        tuple(params),
+    )
+
+
+async def list_claimed_sales_in_group_for_dispute(
+    db_path: str,
+    company_group_id: int,
+    period_date: str,
+    buyer_inn: str,
+    viewer_tg_user_id: int,
+    viewer_role: str,
+) -> List[aiosqlite.Row]:
+    params: list[Any] = [company_group_id, period_date, buyer_inn]
+    where_own = ""
+    if viewer_role == "seller":
+        where_own = " AND c.claimed_by_tg_user_id <> ? "
+        params.append(viewer_tg_user_id)
+    return await fetch_all(
+        db_path,
+        f"""
+        SELECT
+            c.id AS claim_id,
+            c.turnover_id AS turnover_id,
+            c.company_group_id_at_claim AS company_group_id_at_claim,
+            c.claimed_by_tg_user_id AS claimed_by_tg_user_id,
+            c.claimed_at AS claimed_at,
+            COALESCE(u.full_name, '') AS claimed_by_full_name,
+            t.period AS period,
+            t.buyer_inn AS buyer_inn,
+            t.buyer_name AS buyer_name,
+            t.nomenclature AS nomenclature,
+            t.volume_goods AS volume_goods
+        FROM sales_claims c
+        JOIN chz_turnover t ON t.id = c.turnover_id
+        LEFT JOIN users u ON u.tg_user_id = c.claimed_by_tg_user_id
+        WHERE c.company_group_id_at_claim = ?
+          AND c.dispute_status <> 'open'
+          AND substr(t.period, 1, 10) = ?
+          AND t.buyer_inn = ?
+          {where_own}
+        ORDER BY t.nomenclature ASC, c.claimed_at DESC
+        """,
+        tuple(params),
+    )
 
 
 async def get_claim_by_id(db_path: str, claim_id: int) -> Optional[aiosqlite.Row]:
@@ -2586,21 +2940,146 @@ async def create_sale_dispute(
         return int(dispute_id)
 
 
+async def create_sale_dispute_group(
+    db_path: str,
+    company_group_id: int,
+    period_date: str,
+    buyer_inn: str,
+    initiator_tg_user_id: int,
+    moderator_tg_user_id: int,
+) -> int:
+    now_iso = now_utc_iso()
+    async with aiosqlite.connect(db_path) as db:
+        db.row_factory = aiosqlite.Row
+        await db.execute("BEGIN IMMEDIATE")
+        cur = await db.execute(
+            """
+            SELECT
+                c.id AS claim_id,
+                c.turnover_id AS turnover_id,
+                c.claimed_by_tg_user_id AS claimed_by_tg_user_id,
+                c.org_id_at_claim AS org_id_at_claim
+            FROM sales_claims c
+            JOIN chz_turnover t ON t.id = c.turnover_id
+            WHERE c.company_group_id_at_claim = ?
+              AND c.dispute_status <> 'open'
+              AND substr(t.period, 1, 10) = ?
+              AND t.buyer_inn = ?
+            ORDER BY c.id ASC
+            """,
+            (company_group_id, period_date, buyer_inn),
+        )
+        rows = await cur.fetchall()
+        if not rows:
+            await db.rollback()
+            raise ValueError("Claim group not found")
+        total_cur = await db.execute(
+            """
+            SELECT COUNT(*) AS cnt
+            FROM sales_claims c
+            JOIN chz_turnover t ON t.id = c.turnover_id
+            WHERE c.company_group_id_at_claim = ?
+              AND substr(t.period, 1, 10) = ?
+              AND t.buyer_inn = ?
+            """,
+            (company_group_id, period_date, buyer_inn),
+        )
+        total_row = await total_cur.fetchone()
+        total_count = int(total_row["cnt"]) if total_row else 0
+        if total_count != len(rows):
+            await db.rollback()
+            raise ValueError("Claim group contains active dispute")
+        claimed_by_ids = {int(r["claimed_by_tg_user_id"]) for r in rows}
+        if len(claimed_by_ids) != 1:
+            await db.rollback()
+            raise ValueError("Claim group has mixed owners")
+        claim_ids = [int(r["claim_id"]) for r in rows]
+        first = rows[0]
+        dispute_cur = await db.execute(
+            """
+            INSERT INTO sale_disputes (
+                claim_id,
+                turnover_id,
+                company_group_id,
+                org_id,
+                initiator_tg_user_id,
+                claimed_by_tg_user_id,
+                moderator_tg_user_id,
+                status,
+                created_at,
+                updated_at
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, 'open', ?, ?)
+            """,
+            (
+                int(first["claim_id"]),
+                int(first["turnover_id"]),
+                company_group_id,
+                int(first["org_id_at_claim"]),
+                initiator_tg_user_id,
+                int(first["claimed_by_tg_user_id"]),
+                moderator_tg_user_id,
+                now_iso,
+                now_iso,
+            ),
+        )
+        dispute_id = int(dispute_cur.lastrowid)
+        for claim_id in claim_ids:
+            await db.execute(
+                """
+                INSERT INTO sale_dispute_claims (dispute_id, claim_id, created_at)
+                VALUES (?, ?, ?)
+                """,
+                (dispute_id, claim_id, now_iso),
+            )
+        claim_placeholders = ",".join("?" for _ in claim_ids)
+        await db.execute(
+            f"""
+            UPDATE sales_claims
+            SET dispute_status = 'open', dispute_id = ?
+            WHERE id IN ({claim_placeholders})
+            """,
+            (dispute_id, *claim_ids),
+        )
+        await db.commit()
+        return dispute_id
+
+
+async def _get_dispute_claim_ids(db: aiosqlite.Connection, dispute: aiosqlite.Row) -> list[int]:
+    cur = await db.execute(
+        "SELECT claim_id FROM sale_dispute_claims WHERE dispute_id = ? ORDER BY claim_id ASC",
+        (int(dispute["id"]),),
+    )
+    rows = await cur.fetchall()
+    if rows:
+        return [int(r["claim_id"]) for r in rows]
+    return [int(dispute["claim_id"])]
+
+
 async def get_dispute_by_id(db_path: str, dispute_id: int) -> Optional[aiosqlite.Row]:
     return await fetch_one(
         db_path,
         """
-        SELECT d.*, t.period, t.buyer_inn, t.buyer_name, t.volume_goods, c.claimed_at,
+        SELECT
+               d.*,
+               MIN(substr(t.period, 1, 10)) AS period,
+               MAX(t.buyer_inn) AS buyer_inn,
+               MAX(t.buyer_name) AS buyer_name,
+               SUM(t.volume_goods) AS volume_goods,
+               COUNT(c.id) AS claim_count,
+               MAX(c.claimed_at) AS claimed_at,
                COALESCE(u1.full_name, '') AS initiator_full_name,
                COALESCE(u2.full_name, '') AS claimed_by_full_name,
                COALESCE(u3.full_name, '') AS moderator_full_name
         FROM sale_disputes d
-        JOIN chz_turnover t ON t.id = d.turnover_id
-        JOIN sales_claims c ON c.id = d.claim_id
+        LEFT JOIN sale_dispute_claims sdc ON sdc.dispute_id = d.id
+        JOIN sales_claims c ON c.id = COALESCE(sdc.claim_id, d.claim_id)
+        JOIN chz_turnover t ON t.id = c.turnover_id
         LEFT JOIN users u1 ON u1.tg_user_id = d.initiator_tg_user_id
         LEFT JOIN users u2 ON u2.tg_user_id = d.claimed_by_tg_user_id
         LEFT JOIN users u3 ON u3.tg_user_id = d.moderator_tg_user_id
         WHERE d.id = ?
+        GROUP BY d.id
         """,
         (dispute_id,),
     )
@@ -2610,12 +3089,21 @@ async def list_open_disputes_by_initiator(db_path: str, tg_user_id: int) -> List
     return await fetch_all(
         db_path,
         """
-        SELECT d.*, t.period, t.buyer_inn, t.buyer_name, t.volume_goods,
+        SELECT
+               d.*,
+               MIN(substr(t.period, 1, 10)) AS period,
+               MAX(t.buyer_inn) AS buyer_inn,
+               MAX(t.buyer_name) AS buyer_name,
+               SUM(t.volume_goods) AS volume_goods,
+               COUNT(c.id) AS claim_count,
                COALESCE(u1.full_name, '') AS claimed_by_full_name
         FROM sale_disputes d
-        JOIN chz_turnover t ON t.id = d.turnover_id
+        LEFT JOIN sale_dispute_claims sdc ON sdc.dispute_id = d.id
+        JOIN sales_claims c ON c.id = COALESCE(sdc.claim_id, d.claim_id)
+        JOIN chz_turnover t ON t.id = c.turnover_id
         LEFT JOIN users u1 ON u1.tg_user_id = d.claimed_by_tg_user_id
         WHERE d.initiator_tg_user_id = ? AND d.status = 'open'
+        GROUP BY d.id
         ORDER BY d.created_at DESC
         """,
         (tg_user_id,),
@@ -2626,14 +3114,23 @@ async def list_open_disputes_against_user(db_path: str, tg_user_id: int) -> List
     return await fetch_all(
         db_path,
         """
-        SELECT d.*, t.period, t.buyer_inn, t.buyer_name, t.volume_goods,
+        SELECT
+               d.*,
+               MIN(substr(t.period, 1, 10)) AS period,
+               MAX(t.buyer_inn) AS buyer_inn,
+               MAX(t.buyer_name) AS buyer_name,
+               SUM(t.volume_goods) AS volume_goods,
+               COUNT(c.id) AS claim_count,
                COALESCE(u1.full_name, '') AS initiator_full_name
         FROM sale_disputes d
-        JOIN chz_turnover t ON t.id = d.turnover_id
+        LEFT JOIN sale_dispute_claims sdc ON sdc.dispute_id = d.id
+        JOIN sales_claims c ON c.id = COALESCE(sdc.claim_id, d.claim_id)
+        JOIN chz_turnover t ON t.id = c.turnover_id
         LEFT JOIN users u1 ON u1.tg_user_id = d.initiator_tg_user_id
         WHERE d.claimed_by_tg_user_id = ?
           AND d.initiator_tg_user_id <> ?
           AND d.status = 'open'
+        GROUP BY d.id
         ORDER BY d.created_at DESC
         """,
         (tg_user_id, tg_user_id),
@@ -2646,16 +3143,25 @@ async def list_open_disputes_for_moderator(
     return await fetch_all(
         db_path,
         """
-        SELECT d.*, t.period, t.buyer_inn, t.buyer_name, t.volume_goods,
+        SELECT
+               d.*,
+               MIN(substr(t.period, 1, 10)) AS period,
+               MAX(t.buyer_inn) AS buyer_inn,
+               MAX(t.buyer_name) AS buyer_name,
+               SUM(t.volume_goods) AS volume_goods,
+               COUNT(c.id) AS claim_count,
                COALESCE(u1.full_name, '') AS initiator_full_name,
                COALESCE(u2.full_name, '') AS claimed_by_full_name
         FROM sale_disputes d
-        JOIN chz_turnover t ON t.id = d.turnover_id
+        LEFT JOIN sale_dispute_claims sdc ON sdc.dispute_id = d.id
+        JOIN sales_claims c ON c.id = COALESCE(sdc.claim_id, d.claim_id)
+        JOIN chz_turnover t ON t.id = c.turnover_id
         LEFT JOIN users u1 ON u1.tg_user_id = d.initiator_tg_user_id
         LEFT JOIN users u2 ON u2.tg_user_id = d.claimed_by_tg_user_id
         WHERE d.company_group_id = ?
           AND d.status = 'open'
           AND d.moderator_tg_user_id = ?
+        GROUP BY d.id
         ORDER BY d.created_at DESC
         """,
         (company_group_id, moderator_tg_user_id),
@@ -2672,6 +3178,9 @@ async def cancel_dispute(db_path: str, dispute_id: int, initiator_tg_user_id: in
         return False
     now_iso = now_utc_iso()
     async with aiosqlite.connect(db_path) as db:
+        db.row_factory = aiosqlite.Row
+        await db.execute("BEGIN IMMEDIATE")
+        claim_ids = await _get_dispute_claim_ids(db, dispute)
         await db.execute(
             """
             UPDATE sale_disputes
@@ -2680,13 +3189,14 @@ async def cancel_dispute(db_path: str, dispute_id: int, initiator_tg_user_id: in
             """,
             (now_iso, now_iso, dispute_id),
         )
+        placeholders = ",".join("?" for _ in claim_ids)
         await db.execute(
-            """
+            f"""
             UPDATE sales_claims
             SET dispute_status = 'none', dispute_id = NULL
-            WHERE id = ?
+            WHERE id IN ({placeholders})
             """,
-            (int(dispute["claim_id"]),),
+            tuple(claim_ids),
         )
         await db.commit()
     return True
@@ -2708,6 +3218,8 @@ async def resolve_dispute(
     now_iso = now_utc_iso()
     status = "approved" if approve else "rejected"
     async with aiosqlite.connect(db_path) as db:
+        db.row_factory = aiosqlite.Row
+        claim_ids = await _get_dispute_claim_ids(db, dispute)
         cur = await db.execute(
             """
             UPDATE sale_disputes
@@ -2719,30 +3231,31 @@ async def resolve_dispute(
         if cur.rowcount == 0:
             await db.rollback()
             return False
+        placeholders = ",".join("?" for _ in claim_ids)
         if approve:
             await db.execute(
-                """
+                f"""
                 UPDATE sales_claims
                 SET claimed_by_tg_user_id = ?,
                     claimed_at = ?,
                     dispute_status = 'none',
                     dispute_id = NULL
-                WHERE id = ?
+                WHERE id IN ({placeholders})
                 """,
                 (
                     int(dispute["initiator_tg_user_id"]),
                     now_iso,
-                    int(dispute["claim_id"]),
+                    *claim_ids,
                 ),
             )
         else:
             await db.execute(
-                """
+                f"""
                 UPDATE sales_claims
                 SET dispute_status = 'none', dispute_id = NULL
-                WHERE id = ?
+                WHERE id IN ({placeholders})
                 """,
-                (int(dispute["claim_id"]),),
+                tuple(claim_ids),
             )
         await db.commit()
     return True

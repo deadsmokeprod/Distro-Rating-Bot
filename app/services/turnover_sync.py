@@ -57,6 +57,13 @@ async def sync_turnover(
     op_type = operation_type if operation_type is not None else config.onec_operation_type
     start_iso = start.isoformat()
     end_iso = end.isoformat()
+    logger.info(
+        "Starting turnover sync: period=%s..%s operation_type=%s auth_mode=%s",
+        start_iso,
+        end_iso,
+        op_type,
+        "basic" if _basic_auth_tuple(config) else "anonymous",
+    )
     rows = await fetch_chz_turnover(
         config.onec_url,
         start_iso,
@@ -66,13 +73,21 @@ async def sync_turnover(
         basic_auth=_basic_auth_tuple(config),
     )
     upsert_result = await upsert_chz_turnover(config.db_path, _rows_to_dicts(rows))
-    return SyncTurnoverResult(
+    result = SyncTurnoverResult(
         fetched_count=len(rows),
         upserted_count=int(upsert_result["upserted_count"]),
         inserted_count=int(upsert_result["inserted_count"]),
         affected_seller_inns=[str(v) for v in upsert_result["affected_seller_inns"]],
         affected_company_group_ids=[int(v) for v in upsert_result["affected_company_group_ids"]],
     )
+    logger.info(
+        "Turnover sync completed: fetched=%s upserted=%s inserted=%s affected_groups=%s",
+        result.fetched_count,
+        result.upserted_count,
+        result.inserted_count,
+        len(result.affected_company_group_ids),
+    )
+    return result
 
 
 async def send_sync_push_if_needed(

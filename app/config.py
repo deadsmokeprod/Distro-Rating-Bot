@@ -25,8 +25,20 @@ class Config:
     onec_timeout_seconds: int
     sync_push_enabled: bool
     dispute_push_enabled: bool
-    dispute_confirm_delay_sec: int
-    merge_confirm_delay_sec: int
+    sale_confirm_limit: int
+    sale_confirm_window_sec: int
+    sale_confirm_action_cooldown_sec: int
+    sale_confirm_global_cooldown_sec: int
+    dispute_open_limit: int
+    dispute_open_window_sec: int
+    dispute_open_action_cooldown_sec: int
+    dispute_open_global_cooldown_sec: int
+    merge_execute_limit: int
+    merge_execute_window_sec: int
+    merge_execute_action_cooldown_sec: int
+    merge_execute_global_cooldown_sec: int
+    support_send_cooldown_sec: int
+    manager_help_send_cooldown_sec: int
     inline_page_size: int
     rating_window_size: int
     supertask_push_new_enabled: bool
@@ -84,8 +96,20 @@ def load_config() -> Config:
     onec_timeout_seconds = int(os.getenv("ONEC_TIMEOUT_SECONDS", "60"))
     sync_push_enabled = (os.getenv("SYNC_PUSH_ENABLED", "1").strip() == "1")
     dispute_push_enabled = (os.getenv("DISPUTE_PUSH_ENABLED", "1").strip() == "1")
-    dispute_confirm_delay_sec = int(os.getenv("DISPUTE_CONFIRM_DELAY_SEC", "60"))
-    merge_confirm_delay_sec = int(os.getenv("MERGE_CONFIRM_DELAY_SEC", "60"))
+    sale_confirm_limit = int(os.getenv("SALE_CONFIRM_LIMIT", "10"))
+    sale_confirm_window_sec = int(os.getenv("SALE_CONFIRM_WINDOW_SEC", "60"))
+    sale_confirm_action_cooldown_sec = int(os.getenv("SALE_CONFIRM_ACTION_COOLDOWN_SEC", "20"))
+    sale_confirm_global_cooldown_sec = int(os.getenv("SALE_CONFIRM_GLOBAL_COOLDOWN_SEC", "30"))
+    dispute_open_limit = int(os.getenv("DISPUTE_OPEN_LIMIT", "6"))
+    dispute_open_window_sec = int(os.getenv("DISPUTE_OPEN_WINDOW_SEC", "60"))
+    dispute_open_action_cooldown_sec = int(os.getenv("DISPUTE_OPEN_ACTION_COOLDOWN_SEC", "20"))
+    dispute_open_global_cooldown_sec = int(os.getenv("DISPUTE_OPEN_GLOBAL_COOLDOWN_SEC", "5"))
+    merge_execute_limit = int(os.getenv("MERGE_EXECUTE_LIMIT", "4"))
+    merge_execute_window_sec = int(os.getenv("MERGE_EXECUTE_WINDOW_SEC", "60"))
+    merge_execute_action_cooldown_sec = int(os.getenv("MERGE_EXECUTE_ACTION_COOLDOWN_SEC", "20"))
+    merge_execute_global_cooldown_sec = int(os.getenv("MERGE_EXECUTE_GLOBAL_COOLDOWN_SEC", "5"))
+    support_send_cooldown_sec = int(os.getenv("SUPPORT_SEND_COOLDOWN_SEC", "30"))
+    manager_help_send_cooldown_sec = int(os.getenv("MANAGER_HELP_SEND_COOLDOWN_SEC", "30"))
     inline_page_size = int(os.getenv("INLINE_PAGE_SIZE", "10"))
     rating_window_size = int(os.getenv("RATING_WINDOW_SIZE", "10"))
     supertask_push_new_enabled = (os.getenv("SUPERTASK_PUSH_NEW_ENABLED", "1").strip() == "1")
@@ -134,8 +158,20 @@ def load_config() -> Config:
         onec_timeout_seconds=onec_timeout_seconds,
         sync_push_enabled=sync_push_enabled,
         dispute_push_enabled=dispute_push_enabled,
-        dispute_confirm_delay_sec=dispute_confirm_delay_sec,
-        merge_confirm_delay_sec=merge_confirm_delay_sec,
+        sale_confirm_limit=sale_confirm_limit,
+        sale_confirm_window_sec=sale_confirm_window_sec,
+        sale_confirm_action_cooldown_sec=sale_confirm_action_cooldown_sec,
+        sale_confirm_global_cooldown_sec=sale_confirm_global_cooldown_sec,
+        dispute_open_limit=dispute_open_limit,
+        dispute_open_window_sec=dispute_open_window_sec,
+        dispute_open_action_cooldown_sec=dispute_open_action_cooldown_sec,
+        dispute_open_global_cooldown_sec=dispute_open_global_cooldown_sec,
+        merge_execute_limit=merge_execute_limit,
+        merge_execute_window_sec=merge_execute_window_sec,
+        merge_execute_action_cooldown_sec=merge_execute_action_cooldown_sec,
+        merge_execute_global_cooldown_sec=merge_execute_global_cooldown_sec,
+        support_send_cooldown_sec=support_send_cooldown_sec,
+        manager_help_send_cooldown_sec=manager_help_send_cooldown_sec,
         inline_page_size=inline_page_size,
         rating_window_size=rating_window_size,
         supertask_push_new_enabled=supertask_push_new_enabled,

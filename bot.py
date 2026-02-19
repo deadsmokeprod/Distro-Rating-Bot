@@ -92,7 +92,12 @@ async def main() -> None:
                 push_sent,
             )
         except OnecClientError as exc:
-            logging.getLogger(__name__).error("Scheduled sync failed: %s", exc)
+            logging.getLogger(__name__).error(
+                "Scheduled sync failed: status=%s code=%s error=%s",
+                getattr(exc, "status_code", None),
+                getattr(exc, "code", "ONEC_ERROR"),
+                str(exc),
+            )
         except Exception:
             logging.getLogger(__name__).exception("Scheduled sync failed")
 
@@ -246,14 +251,7 @@ async def main() -> None:
     scheduler.add_job(
         ensure_biweekly_challenges,
         CronTrigger(day=1, hour=0, minute=5),
-        id="challenge_start_1",
-        replace_existing=True,
-        args=[config],
-    )
-    scheduler.add_job(
-        ensure_biweekly_challenges,
-        CronTrigger(day=15, hour=0, minute=5),
-        id="challenge_start_15",
+        id="challenge_monthly_start",
         replace_existing=True,
         args=[config],
     )

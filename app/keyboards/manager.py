@@ -26,31 +26,43 @@ ORG_ACTION_RESET_ROP_PASSWORD = "🔄 Сбросить пароль ROP"
 MANAGER_MENU_FIRE_ROP = "🧯 Уволить РОП"
 
 
-def manager_main_menu():
-    return build_reply_keyboard(
-        [
-            MANAGER_MENU_REGISTER_ORG,
-            MANAGER_MENU_ORGS,
-            MANAGER_MENU_SYNC,
-            MANAGER_MENU_EXPORT_RATINGS,
-            MANAGER_MENU_BROADCAST,
-            MANAGER_MENU_CHANGE_INN,
-            MANAGER_MENU_MERGE_ORGS,
-            MANAGER_MENU_GOALS_ADMIN,
-            MANAGER_MENU_RULES,
-            MANAGER_MENU_FIRE_ROP,
-            MANAGER_MENU_HELP,
-        ]
-    )
+def manager_main_menu(is_admin_view: bool = False):
+    labels = [
+        MANAGER_MENU_REGISTER_ORG,
+        MANAGER_MENU_ORGS,
+        MANAGER_MENU_SYNC,
+        MANAGER_MENU_EXPORT_RATINGS,
+        MANAGER_MENU_BROADCAST,
+        MANAGER_MENU_CHANGE_INN,
+        MANAGER_MENU_RULES,
+        MANAGER_MENU_FIRE_ROP,
+        MANAGER_MENU_HELP,
+    ]
+    if is_admin_view:
+        labels.extend(
+            [
+                MANAGER_MENU_MERGE_ORGS,
+                MANAGER_MENU_GOALS_ADMIN,
+            ]
+        )
+    return build_reply_keyboard(labels)
 
 
 MANAGER_BROADCAST_ALL = "Всем продавцам"
 MANAGER_BROADCAST_MY_ORGS = "Продавцам моих компаний"
+MANAGER_BROADCAST_BY_ORG = "По выбранной компании"
 MANAGER_BROADCAST_CONFIRM = "Отправить"
 
 
-def manager_broadcast_target_menu():
-    return build_reply_keyboard([MANAGER_BROADCAST_ALL, MANAGER_BROADCAST_MY_ORGS, BACK_TEXT])
+def manager_broadcast_target_menu(is_admin_view: bool = False):
+    labels = [
+        MANAGER_BROADCAST_MY_ORGS,
+        MANAGER_BROADCAST_BY_ORG,
+    ]
+    if is_admin_view:
+        labels.insert(0, MANAGER_BROADCAST_ALL)
+    labels.append(BACK_TEXT)
+    return build_reply_keyboard(labels)
 
 
 def manager_broadcast_confirm_menu():
